@@ -16,6 +16,8 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
+#DP - Updating to latest Blender (Seq change)
+
 #Known bugs:
 #   aspect ratio isnt detected properly for videos with non-square pixels... not sure how to detect this.
 
@@ -993,7 +995,9 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             elif previous_image_plane.slideshow.transition == "NONE":
                 pass
             else:
-                effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', seq1=first_sequence, seq2=second_sequence)
+                # Create a cross-fade effect strip that transitions between the two images.
+                # effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', seq1=first_sequence, seq2=second_sequence)
+                effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', input1=first_sequence, input2=second_sequence)
 
     #Add fade out
     if i == (len(images) - 1):

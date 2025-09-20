@@ -16,18 +16,16 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
-#DP - Updating to latest Blender (Seq change)
-
-#Known bugs:
-#   aspect ratio isnt detected properly for videos with non-square pixels... not sure how to detect this.
-
-
 import bpy
+import re
+from bpy.props import *
+
 import random
 import glob
 import os
 import sys
 import math
+import json
 from bpy_extras.image_utils import load_image
 from bpy.app.handlers import persistent
 
@@ -36,15 +34,15 @@ bl_info = {
     "name": "Snu Slideshow Generator",
     "description": "Assists in creating image slideshows with a variety of options.",
     "author": "Hudson Barkley (Snu)",
-    "version": (0, 87, 0),
+    "version": (0, 88, 0),
     "blender": (4, 4, 0),
-    "location": "3D View Sideobar, 'Slideshow' tab.",
+    "location": "3D View Sidebar, 'Slideshow' tab.",
     "wiki_url": "https://github.com/snuq/SnuSlideshowGenerator",
     "category": "Import-Export"
 }
 
 
-#This is a list of transform dictionary objects
+# Transform definitions
 transforms = [
     {
         'name': 'None',
@@ -166,7 +164,7 @@ def update_scene(scene):
 
 def select_plane(image_plane, scene):
     if image_plane:
-        if image_plane.name in bpy.context.view_layer.objects:  #Bug in Blender 2.8... seems this doesnt get updated when called from a panel
+        if image_plane.name in bpy.context.view_layer.objects:
             image_plane.select_set(True)
             bpy.context.view_layer.objects.active = image_plane
 
@@ -180,7 +178,6 @@ def is_generator_scene(scene):
 
 @persistent
 def slideshow_autoupdate(_):
-    #Auto-running modal function to update the slideshow scene so the slides stay ordered properly
     if is_generator_scene(bpy.context.scene):
         update_order()
         lock_view()
@@ -206,13 +203,21 @@ def get_fps(scene):
     return scene.render.fps / scene.render.fps_base
 
 
+def sanitize_text_for_driver(text):
+    """Sanitize text content to be safe for use in driver expressions"""
+    # Escape quotes and special characters
+    text = text.replace('\\', '\\\\')  # Escape backslashes first
+    text = text.replace('"', '\\"')    # Escape double quotes
+    text = text.replace('\n', '\\n')   # Escape newlines
+    text = text.replace('\r', '\\r')   # Escape carriage returns
+    text = text.replace('\t', '\\t')   # Escape tabs
+    return text
+
 def create_scene(oldscene, scenename):
-    #Creates a new scene and copies over render settings from current scene
     newscene = bpy.data.scenes.new(scenename)
 
-    #These loops are needed because there apparently is no way to easily copy the render settings from one scene to another
+    # Copy render settings
     for prop in oldscene.render.bl_rna.properties:
-        #Copy the general render settings
         if not prop.is_readonly:
             value = eval('oldscene.render.'+prop.identifier)
             try:
@@ -220,7 +225,6 @@ def create_scene(oldscene, scenename):
             except Exception as e:
                 pass
     for prop in oldscene.render.image_settings.bl_rna.properties:
-        #Copy the image/video encoding settings
         if not prop.is_readonly:
             value = eval('oldscene.render.image_settings.'+prop.identifier)
             try:
@@ -228,7 +232,6 @@ def create_scene(oldscene, scenename):
             except Exception as e:
                 pass
     for prop in oldscene.render.ffmpeg.bl_rna.properties:
-        #Copy the video encoder settings
         if not prop.is_readonly:
             value = eval('oldscene.render.ffmpeg.'+prop.identifier)
             try:
@@ -236,9 +239,9 @@ def create_scene(oldscene, scenename):
             except Exception as e:
                 pass
 
-    newscene.view_settings.view_transform = oldscene.view_settings.view_transform  #really not sure why this is needed, but it is...?
+    newscene.view_settings.view_transform = oldscene.view_settings.view_transform
 
-    #Set variables that are specific to the slideshow scene
+    # Set slideshow-specific settings
     newscene.render.film_transparent = False
     newscene.render.engine = 'BLENDER_EEVEE_NEXT'
     newscene.eevee.use_shadows = True
@@ -254,8 +257,921 @@ def aspect_ratio(scene):
     return (render.pixel_aspect_x * render.resolution_x) / (render.pixel_aspect_y * render.resolution_y)
 
 
+def get_text_location(generator_scene, y_offset, size=0.18):
+    """Return correct (x, y, z) based on chosen alignment"""
+    align = generator_scene.snu_slideshow_generator.text_alignment
+    
+    # Adjust X position based on alignment
+    # These positions work with Blender's internal text alignment
+    if align == 'LEFT':
+        x = -1.6  # Slightly adjusted from -1.8
+    elif align == 'RIGHT':
+        x = 1.6   # Slightly adjusted from 1.8
+    else:  # CENTER
+        x = 0.0
+    
+    return (x, y_offset, 0)
+
+
+# NEW: Per-slide text data management functions
+def load_slide_text_data(image_filepath):
+    """Load text data from .txt file corresponding to image file"""
+    try:
+        # Get the base name without extension
+        base_name = os.path.splitext(image_filepath)[0]
+        txt_filepath = base_name + '.txt'
+        
+        if os.path.exists(txt_filepath):
+            text_data = {
+                'photographer': '',
+                'when': '',
+                'who': '',
+                'where': '',
+                'has_text': True
+            }
+            
+            with open(txt_filepath, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            # Parse the text file looking for our 4 variables
+            for line in lines:
+                line = line.strip()
+                if line.lower().startswith('photographer:'):
+                    text_data['photographer'] = line.split(':', 1)[1].strip()
+                elif line.lower().startswith('when:'):
+                    text_data['when'] = line.split(':', 1)[1].strip()
+                elif line.lower().startswith('who:'):
+                    text_data['who'] = line.split(':', 1)[1].strip()
+                elif line.lower().startswith('where:'):
+                    text_data['where'] = line.split(':', 1)[1].strip()
+            
+            return text_data
+    except Exception as e:
+        print(f"Error loading text data for {image_filepath}: {e}")
+    
+    return {'photographer': '', 'when': '', 'who': '', 'where': '', 'has_text': False}
+
+
+def create_text_material(name="TextMaterial"):
+    """Create a material for text objects to ensure they render properly"""
+    if name in bpy.data.materials:
+        return bpy.data.materials[name]
+    
+    material = bpy.data.materials.new(name=name)
+    material.use_nodes = True
+    
+    # Clear default nodes
+    material.node_tree.nodes.clear()
+    
+    # Create emission shader for bright text
+    emission_node = material.node_tree.nodes.new('ShaderNodeEmission')
+    emission_node.name = "TextEmission"  # Give it a specific name for debugging
+    emission_node.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)  # White color
+    emission_node.inputs[1].default_value = 2.0  # Increased emission strength
+    emission_node.location = (0, 0)
+    
+    # Create output node
+    output_node = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
+    output_node.location = (200, 0)
+    
+    # Link nodes
+    material.node_tree.links.new(emission_node.outputs[0], output_node.inputs[0])
+    
+    return material
+
+
+def add_typewriter_keyframes(text_obj, full_text, scene):
+    """Add typewriter animation effect using keyframes on the body property"""
+    
+    # Clear existing animation data
+    if text_obj.data.animation_data:
+        text_obj.data.animation_data_clear()
+    
+    # Create animation data and action
+    text_obj.data.animation_data_create()
+    action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
+    text_obj.data.animation_data.action = action
+    
+    # Calculate timing
+    fps = get_fps(scene)
+    chars_per_second = 8  # Typing speed
+    frames_per_char = max(1, int(fps / chars_per_second))
+    
+    # Set initial frame and create keyframes for each character
+    scene.frame_set(1)
+    text_obj.data.body = ""
+    text_obj.data.keyframe_insert(data_path="body", frame=1)
+    
+    # Create keyframe for each character addition
+    for i, char in enumerate(full_text):
+        frame = 1 + (i + 1) * frames_per_char
+        partial_text = full_text[:i + 1]
+        scene.frame_set(frame)
+        text_obj.data.body = partial_text
+        text_obj.data.keyframe_insert(data_path="body", frame=frame)
+    
+    # Set interpolation to constant (no smoothing between text states)
+    if text_obj.data.animation_data and text_obj.data.animation_data.action:
+        for fcurve in text_obj.data.animation_data.action.fcurves:
+            if fcurve.data_path == "body":
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.interpolation = 'CONSTANT'
+    
+    # Reset to start
+    scene.frame_set(1)
+
+
+@bpy.app.handlers.persistent
+def typewriter_frame_handler(scene):
+    """Frame handler for typewriter animation"""
+    
+    for obj in scene.objects:
+        if (obj.type == 'FONT' and 
+            "typewriter_full_text" in obj and 
+            "typewriter_start_frame" in obj and
+            not obj.data.animation_data):  # Only for frame-based animation
+            
+            current_frame = scene.frame_current
+            start_frame = obj["typewriter_start_frame"]
+            frames_per_char = obj.get("typewriter_frames_per_char", 8)
+            full_text = obj["typewriter_full_text"]
+            
+            # Calculate how many characters to show
+            elapsed_frames = current_frame - start_frame
+            char_count = max(0, min(len(full_text), elapsed_frames // frames_per_char))
+            
+            # Update the text body
+            obj.data.body = full_text[:int(char_count)]
+
+
+def add_typewriter_animation_frame_based(text_obj, full_text, scene):
+    """Fallback frame-based typewriter animation using frame handlers"""
+    
+    # Clear existing animation data
+    if text_obj.animation_data:
+        text_obj.animation_data_clear()
+    
+    # Store animation data in the object
+    text_obj["typewriter_full_text"] = full_text
+    text_obj["typewriter_start_frame"] = scene.frame_current
+    
+    fps = get_fps(scene)
+    chars_per_second = 8
+    frames_per_char = max(1, int(fps / chars_per_second))
+    text_obj["typewriter_frames_per_char"] = frames_per_char
+    text_obj["typewriter_total_frames"] = len(full_text) * frames_per_char
+    
+    # Register frame handler for this specific object
+    if typewriter_frame_handler not in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.append(typewriter_frame_handler)
+
+
+def add_typewriter_animation_robust(text_obj, full_text, scene):
+    """Add robust typewriter animation using custom properties and drivers"""
+    
+    if not full_text.strip():  # Handle empty text
+        text_obj.data.body = ""
+        return
+    
+    # Clear existing animation data
+    if text_obj.animation_data:
+        text_obj.animation_data_clear()
+    
+    # Remove existing drivers on the body property
+    if text_obj.data.animation_data:
+        text_obj.data.animation_data.drivers.clear()
+    
+    # Store the full text in a custom property (safely encoded)
+    sanitized_text = sanitize_text_for_driver(full_text)
+    text_obj["typewriter_full_text"] = full_text  # Store original text
+    text_obj["typewriter_sanitized_text"] = sanitized_text  # Store sanitized version
+    
+    # Add a custom property to control the typewriter effect
+    text_obj["typewriter_progress"] = 0.0
+    
+    # Set up the custom property with proper range
+    try:
+        text_obj.id_properties_ui("typewriter_progress").update(
+            min=0.0,
+            max=float(len(full_text)),
+            soft_min=0.0,
+            soft_max=float(len(full_text)),
+            description="Controls typewriter effect progress"
+        )
+    except AttributeError:
+        # Fallback for older Blender versions
+        pass
+    
+    # Create animation data and action for the custom property
+    text_obj.animation_data_create()
+    action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
+    text_obj.animation_data.action = action
+    
+    # Calculate timing
+    fps = get_fps(scene)
+    chars_per_second = 8  # Typing speed
+    frames_per_char = max(1, int(fps / chars_per_second))
+    total_frames = len(full_text) * frames_per_char
+    
+    # Create keyframes for the progress property
+    fcurve = action.fcurves.new(data_path='["typewriter_progress"]')
+    
+    # Start keyframe
+    start_point = fcurve.keyframe_points.insert(frame=1, value=0.0)
+    start_point.interpolation = 'LINEAR'
+    
+    # End keyframe  
+    end_point = fcurve.keyframe_points.insert(frame=total_frames + 1, value=float(len(full_text)))
+    end_point.interpolation = 'LINEAR'
+    
+    # Add a driver to control the text body based on the custom property
+    try:
+        driver = text_obj.data.driver_add("body")
+        driver.driver.type = 'SCRIPTED'
+        
+        # Add variable for the custom property
+        var = driver.driver.variables.new()
+        var.name = "progress"
+        var.type = 'SINGLE_PROP'
+        var.targets[0].id = text_obj
+        var.targets[0].data_path = '["typewriter_progress"]'
+        
+        # Add variable for the full text
+        var_text = driver.driver.variables.new()
+        var_text.name = "full_text"
+        var_text.type = 'SINGLE_PROP'
+        var_text.targets[0].id = text_obj
+        var_text.targets[0].data_path = '["typewriter_full_text"]'
+        
+        # Set the driver expression - use a safer approach
+        driver.driver.expression = f"full_text[0:int(max(0, min(progress, len(full_text))))] if full_text else ''"
+        
+    except Exception as e:
+        print(f"Error creating driver for {text_obj.name}: {e}")
+        # Fallback to frame-based approach
+        add_typewriter_animation_frame_based(text_obj, full_text, scene)
+        return
+    
+    # Reset to start
+    scene.frame_set(1)
+    text_obj["typewriter_progress"] = 0.0
+
+
+def create_outline_material(name="TextOutlineMaterial"):
+    """Create a material for text outline to improve contrast and readability"""
+    if name in bpy.data.materials:
+        return bpy.data.materials[name]
+    
+    material = bpy.data.materials.new(name=name)
+    material.use_nodes = True
+    
+    # Clear default nodes
+    material.node_tree.nodes.clear()
+    
+    # Create emission shader for dark outline
+    emission_node = material.node_tree.nodes.new('ShaderNodeEmission')
+    emission_node.name = "OutlineEmission"  # Give it a specific name for debugging
+    emission_node.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)  # Black color for outline
+    emission_node.inputs[1].default_value = 1.5  # Lower emission strength for outline
+    emission_node.location = (0, 0)
+    
+    # Create output node
+    output_node = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
+    output_node.location = (200, 0)
+    
+    # Link nodes
+    material.node_tree.links.new(emission_node.outputs[0], output_node.inputs[0])
+    
+    return material
+
+
+def create_typewriter_text_robust(scene, text_content, name, location=(0, 0, 0), size=1.0):
+    """Create a 3D text object with robust typewriter animation effect"""
+    
+    # Create text object
+    font_curve = bpy.data.curves.new(name=name, type='FONT')
+    text_obj = bpy.data.objects.new(name=name, object_data=font_curve)
+    scene.collection.objects.link(text_obj)
+    
+    # Set text properties
+    font_curve.body = ""  # Start with empty text
+    font_curve.size = size
+    
+    # FIXED: Remove 3D extrusion to eliminate shadow/doubling effects
+    font_curve.extrude = 0.00  # Keep it flat to avoid shadow artifacts
+    outline_material = create_outline_material("CustomOutline")
+    font_curve.materials.append(outline_material)  # Create separate outline material
+    font_curve.bevel_depth = 0.01  # Small bevel for outline effect only
+    #font_curve.bevel_depth = 0.0  # No beveling to prevent visual artifacts
+    font_curve.bevel_resolution = 0
+    
+    # FIXED: Add proper character and word spacing for better readability
+    font_curve.space_character = 1.1  # Increase character spacing by 10%
+    font_curve.space_word = 1.2       # Increase word spacing by 20%
+    font_curve.space_line = 1.1       # Increase line spacing by 10%
+    
+    # Set text alignment and positioning
+    font_curve.align_x = 'CENTER'
+    font_curve.align_y = 'CENTER'
+    
+    # FIXED: Improve text quality settings
+    font_curve.resolution_u = 4  # Higher resolution for smoother curves
+    font_curve.render_resolution_u = 4  # Higher render resolution
+    
+    # Create and assign material for proper rendering
+    text_material = create_text_material(f"{name}_Material")
+    text_obj.data.materials.append(text_material)
+    
+    # Position the text
+    text_obj.location = location
+    
+    # Add robust typewriter animation
+    add_typewriter_animation_robust(text_obj, text_content, scene)
+    
+    return text_obj
+
+
+def add_typewriter_effect(text_obj, full_text, scene):
+    """Add typewriter animation effect to text object using drivers and custom properties"""
+    
+    # Clear existing animation data
+    if text_obj.animation_data:
+        text_obj.animation_data_clear()
+    
+    # Add a custom property to control the typewriter effect
+    text_obj["typewriter_progress"] = 0.0
+    
+    # Set up the custom property with proper range
+    text_obj.id_properties_ui("typewriter_progress").update(
+        min=0.0,
+        max=float(len(full_text)),
+        soft_min=0.0,
+        soft_max=float(len(full_text)),
+        description="Controls typewriter effect progress"
+    )
+    
+    # Create animation data and action for the custom property
+    text_obj.animation_data_create()
+    action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
+    text_obj.animation_data.action = action
+    
+    # Animate the custom property
+    fps = get_fps(scene)
+    chars_per_second = 8  # Typing speed (slightly slower for better readability)
+    frames_per_char = max(1, int(fps / chars_per_second))
+    total_frames = len(full_text) * frames_per_char
+    
+    # Create keyframes for the progress property
+    fcurve = action.fcurves.new(data_path='["typewriter_progress"]')
+    
+    # Start keyframe
+    start_point = fcurve.keyframe_points.insert(frame=1, value=0.0)
+    start_point.interpolation = 'LINEAR'
+    
+    # End keyframe
+    end_point = fcurve.keyframe_points.insert(frame=total_frames + 1, value=float(len(full_text)))
+    end_point.interpolation = 'LINEAR'
+    
+    # Add a driver to control the text body based on the custom property
+    driver = text_obj.data.driver_add("body")
+    driver.driver.type = 'SCRIPTED'
+    
+    # Add variable for the custom property
+    var = driver.driver.variables.new()
+    var.name = "progress"
+    var.type = 'SINGLE_PROP'
+    var.targets[0].id = text_obj
+    var.targets[0].data_path = '["typewriter_progress"]'
+    
+    # Store the full text in a custom property for the driver to access
+    text_obj["full_text"] = full_text
+    
+    # Set the driver expression to slice the text based on progress
+    driver.driver.expression = f'"{full_text}"[0:int(max(0, min(progress, {len(full_text)})))]'
+    
+    # Reset to start
+    scene.frame_set(1)
+    text_obj["typewriter_progress"] = 0.0
+
+
+def add_animation_delay_robust(text_obj, delay_frames):
+    """Add a delay to the typewriter animation by shifting keyframes or adjusting start frame"""
+    
+    if text_obj.data.animation_data and text_obj.data.animation_data.action:
+        # Keyframe-based animation - shift keyframes
+        for fcurve in text_obj.data.animation_data.action.fcurves:
+            if fcurve.data_path == '["typewriter_progress"]':
+                for keyframe in fcurve.keyframe_points:
+                    keyframe.co[0] += delay_frames
+                    keyframe.handle_left[0] += delay_frames
+                    keyframe.handle_right[0] += delay_frames
+    elif "typewriter_start_frame" in text_obj:
+        # Frame-based animation - adjust start frame
+        text_obj["typewriter_start_frame"] += delay_frames
+
+
+def create_typewriter_text_with_improved_outline(scene, text_content, name, location=(0, 0, 0), size=1.0, alignment='LEFT'):
+    """Create text with properly aligned outline/shadow based on alignment setting"""
+    
+    outline_mat_name = f"{name}_OutlineMaterial"
+    main_mat_name = f"{name}_MainMaterial"
+
+    # Create outline text (shadow)
+    outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
+    outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
+    scene.collection.objects.link(outline_obj)
+
+    # Create main text  
+    main_curve = bpy.data.curves.new(name=name, type='FONT')
+    main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
+    scene.collection.objects.link(main_obj)
+
+    # Set IDENTICAL properties for both texts
+    for curve in [outline_curve, main_curve]:
+        curve.body = ""
+        curve.size = size
+        curve.extrude = 0.0
+        curve.bevel_depth = 0.0
+        curve.space_character = 1.15
+        curve.space_word = 1.25
+        curve.space_line = 1.15
+        curve.align_x = alignment  # Apply the alignment to both
+        curve.align_y = 'CENTER'
+        curve.resolution_u = 4
+        curve.render_resolution_u = 4
+        curve.use_fill_caps = True
+
+    # Calculate shadow offset based on alignment
+    # The key is to adjust the offset direction based on text alignment
+    shadow_offset_base = size * 0.02  # Reduced from 0.03 for subtler effect
+    
+    if alignment == 'LEFT':
+        # For left-aligned text, shadow goes right and down
+        shadow_offset_x = shadow_offset_base
+        shadow_offset_y = -shadow_offset_base
+    elif alignment == 'RIGHT':
+        # For right-aligned text, shadow goes left and down
+        shadow_offset_x = -shadow_offset_base
+        shadow_offset_y = -shadow_offset_base
+    else:  # CENTER
+        # For centered text, shadow goes straight down (no X offset)
+        shadow_offset_x = 0
+        shadow_offset_y = -shadow_offset_base * 1.5  # Slightly more Y offset for centered
+
+    # Position both objects at the same base location
+    # The alignment handles the text positioning internally
+    outline_obj.location = (
+        location[0] + shadow_offset_x,
+        location[1] + shadow_offset_y,
+        location[2] - 0.001  # Z-offset for layering
+    )
+    
+    main_obj.location = location
+
+    # Create and assign materials
+    outline_material = create_outline_material(outline_mat_name)
+    main_material = create_text_material(main_mat_name)
+
+    outline_obj.data.materials.clear()
+    main_obj.data.materials.clear()
+    outline_obj.data.materials.append(outline_material)
+    main_obj.data.materials.append(main_material)
+
+    # Ensure high contrast
+    try:
+        outline_emission = outline_material.node_tree.nodes.get("OutlineEmission")
+        main_emission = main_material.node_tree.nodes.get("TextEmission")
+        if outline_emission and main_emission:
+            outline_emission.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)  # Pure black
+            outline_emission.inputs[1].default_value = 2.0  # Moderate emission
+            main_emission.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)    # Pure white  
+            main_emission.inputs[1].default_value = 3.0  # Higher emission for main text
+    except Exception as e:
+        print(f"Material setup error: {e}")
+
+    # Update scene to apply changes
+    scene.view_layers[0].update()
+    
+    # Parent outline to main for easier management
+    outline_obj.parent = main_obj
+    
+    # Keep the parenting offset minimal
+    outline_obj.location = (shadow_offset_x, shadow_offset_y, -0.001)
+
+    # Add typewriter animations to both
+    add_typewriter_animation_robust(main_obj, text_content, scene)
+    add_typewriter_animation_robust(outline_obj, text_content, scene)
+
+    return main_obj
+
+
+def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide, slide_duration):
+    """Create a scene with improved outlined text overlays - updated to pass alignment"""
+    
+    # Check if slide has text data and is enabled
+    if not slide.slideshow.enable_text_overlay:
+        return None
+        
+    text_fields = [
+        ('text_photographer', 'Photo by'),
+        ('text_when', 'When'),
+        ('text_who', 'Who'),
+        ('text_where', 'Where')
+    ]
+    
+    # Check if any text fields have content
+    has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
+    if not has_content:
+        return None
+    
+    text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
+    
+    # Remove existing text scene if it exists
+    if bpy.data.scenes.find(text_scene_name) != -1:
+        bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
+    
+    # Create new text scene
+    text_scene = create_scene(generator_scene, text_scene_name)
+    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
+    
+    # Set up transparent background
+    text_scene.render.film_transparent = True
+    
+    # Enhanced rendering settings for Blender 4.x EEVEE Next
+    text_scene.eevee.use_taa_reprojection = True
+    text_scene.eevee.taa_samples = 16
+    
+    # Disable bloom if available
+    try:
+        if hasattr(text_scene.eevee, 'use_bloom'):
+            text_scene.eevee.use_bloom = False
+        elif hasattr(text_scene.eevee, 'bloom_threshold'):
+            text_scene.eevee.bloom_threshold = 10.0
+    except AttributeError:
+        pass
+    
+    # Create world with transparent background
+    world = bpy.data.worlds.new(text_scene.name)
+    text_scene.world = world
+    world.use_nodes = True
+    world.node_tree.nodes.clear()
+    
+    # Add transparent background
+    output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
+    transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
+    transparent_node.inputs[0].default_value = (0, 0, 0, 0)
+    transparent_node.inputs[1].default_value = 0
+    world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
+    
+    # Get the alignment setting
+    text_alignment = generator_scene.snu_slideshow_generator.text_alignment
+    
+    # Create text objects with improved outline
+    y_offset = 0.6
+    text_size = 0.18
+    delay_frames = 0
+    fps = get_fps(text_scene)
+    
+    for field_name, label in text_fields:
+        field_value = getattr(slide.slideshow, field_name, '')
+        if field_value:
+            text_content = f"{label}: {field_value}"
+            
+            # Pass the alignment parameter to the function
+            text_obj = create_typewriter_text_with_improved_outline(
+                text_scene, 
+                text_content,
+                f"{field_name.title()}_Text",
+                location=get_text_location(generator_scene, y_offset, text_size),
+                size=text_size,
+                alignment=text_alignment  # Pass the alignment setting
+            )
+            
+            # Add delay to animation
+            if delay_frames > 0:
+                add_animation_delay_robust(text_obj, delay_frames)
+                # Also add delay to outline
+                if f"{text_obj.name}_Outline" in text_scene.objects:
+                    outline_obj = text_scene.objects[f"{text_obj.name}_Outline"]
+                    add_animation_delay_robust(outline_obj, delay_frames)
+            
+            y_offset -= 0.35
+            delay_frames += int(fps * 1.2)
+    
+    # Set up camera with proper settings for text rendering
+    camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
+    camera.location = (0, 0, 5)
+    camera.data.clip_start = 0.1
+    camera.data.clip_end = 100.0
+    text_scene.camera = camera
+    
+    return text_scene
+
+
+def create_typewriter_text_with_outline(scene, text_content, name, location=(0, 0, 0), size=1.0):
+    """Create a 3D text object with outline effect for better contrast"""
+    
+    # Create text object
+    font_curve = bpy.data.curves.new(name=name, type='FONT')
+    text_obj = bpy.data.objects.new(name=name, object_data=font_curve)
+    scene.collection.objects.link(text_obj)
+    
+    # Set text properties
+    font_curve.body = ""  # Start with empty text
+    font_curve.size = size
+    
+    # Create subtle bevel for outline effect only
+    font_curve.extrude = 0.0  # Keep face flat
+    font_curve.bevel_depth = 0.015  # Very small bevel for outline
+    font_curve.bevel_resolution = 2
+    font_curve.use_fill_caps = True  # Ensure proper face rendering
+    
+    # Character spacing improvements
+    font_curve.space_character = 1.15  # 15% increase in character spacing
+    font_curve.space_word = 1.25       # 25% increase in word spacing
+    font_curve.space_line = 1.15       # 15% increase in line spacing
+    
+    # Set text alignment and positioning
+    font_curve.align_x = 'CENTER'
+    font_curve.align_y = 'CENTER'
+    
+    # Higher resolution for smoother curves
+    font_curve.resolution_u = 4
+    font_curve.render_resolution_u = 4
+    
+    # Create and assign materials
+    # Material slot 0: Main text (white)
+    text_material = create_text_material(f"{name}_Material")
+    text_obj.data.materials.append(text_material)
+    
+    # Material slot 1: Outline/bevel (black)
+    outline_material = create_outline_material(f"{name}_OutlineMaterial")
+    text_obj.data.materials.append(outline_material)
+    
+    # Assign materials to different parts of the geometry
+    # The bevel faces will use the outline material automatically
+    font_curve.bevel_factor_mapping_start = 0.0
+    font_curve.bevel_factor_mapping_end = 1.0
+    
+    # Position the text
+    text_obj.location = location
+    
+    # Add robust typewriter animation
+    add_typewriter_animation_robust(text_obj, text_content, scene)
+    
+    return text_obj
+
+
+def create_typewriter_text_with_simple_outline(scene, text_content, name, location=(0, 0, 0), size=1.0):
+    """Alternative approach: Create two text objects for outline effect"""
+    
+    # Create unique material names to avoid conflicts
+    outline_mat_name = f"{name}_Outline_Mat_{random.randint(1000,9999)}"
+    main_mat_name = f"{name}_Main_Mat_{random.randint(1000,9999)}"
+    
+    # Create outline text (slightly larger, black)
+    outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
+    outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
+    scene.collection.objects.link(outline_obj)
+    
+    # Outline properties
+    outline_curve.body = ""
+    outline_curve.size = size * 1.08  # 8% larger for better outline visibility
+    outline_curve.extrude = 0.0
+    outline_curve.bevel_depth = 0.0
+    outline_curve.space_character = 1.15
+    outline_curve.space_word = 1.25
+    outline_curve.space_line = 1.15
+    outline_curve.align_x = 'CENTER'
+    outline_curve.align_y = 'CENTER'
+    outline_curve.resolution_u = 4
+    outline_curve.render_resolution_u = 4
+    
+    # Create main text (normal size, white)
+    main_curve = bpy.data.curves.new(name=name, type='FONT')
+    main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
+    scene.collection.objects.link(main_obj)
+    
+    # Main text properties
+    main_curve.body = ""
+    main_curve.size = size
+    main_curve.extrude = 0.0
+    main_curve.bevel_depth = 0.0
+    main_curve.space_character = 1.15
+    main_curve.space_word = 1.25
+    main_curve.space_line = 1.15
+    main_curve.align_x = 'CENTER'
+    main_curve.align_y = 'CENTER'
+    main_curve.resolution_u = 4
+    main_curve.render_resolution_u = 4
+    
+    # Position objects with proper Z separation
+    # outline_obj.location = (location[0], location[1], location[2] - 0.001)  # Behind (lower Z)
+    # main_obj.location = (location[0], location[1], location[2])              # In front (higher Z)
+    # Position both at the same center point with just Z-offset
+    outline_obj.location = (location[0], location[1], location[2] - 0.001)
+    main_obj.location = location
+
+    # Create materials with explicit debugging
+    print(f"Creating materials for {name}...")
+    outline_material = create_outline_material(outline_mat_name)
+    main_material = create_text_material(main_mat_name)
+    
+    # Assign materials explicitly
+    outline_obj.data.materials.clear()  # Clear any existing materials
+    main_obj.data.materials.clear()     # Clear any existing materials
+    
+    outline_obj.data.materials.append(outline_material)  # BLACK outline behind
+    main_obj.data.materials.append(main_material)        # WHITE text in front
+    
+    # Debug: Print what we assigned
+    print(f"Outline object '{outline_obj.name}' assigned material: {outline_material.name}")
+    print(f"Main object '{main_obj.name}' assigned material: {main_material.name}")
+    print(f"Outline material color: {outline_material.node_tree.nodes['Emission'].inputs[0].default_value}")
+    print(f"Main material color: {main_material.node_tree.nodes['Emission'].inputs[0].default_value}")
+    
+    # Parent outline to main text for easier management
+    outline_obj.parent = main_obj
+    
+    # Add typewriter animation to both objects with same content
+    add_typewriter_animation_robust(main_obj, text_content, scene)
+    add_typewriter_animation_robust(outline_obj, text_content, scene)
+    
+    return main_obj  # Return main object as primary reference
+
+
+# Updated scene creation function using outline method
+def create_slide_text_overlay_scene_with_outline(generator_scene, slide, slide_duration):
+    """Create a scene with outlined text overlays for better contrast"""
+    
+    # Check if slide has text data and is enabled
+    if not slide.slideshow.enable_text_overlay:
+        return None
+        
+    text_fields = [
+        ('text_photographer', 'Photo by'),
+        ('text_when', 'When'),
+        ('text_who', 'Who'),
+        ('text_where', 'Where')
+    ]
+    
+    # Check if any text fields have content
+    has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
+    if not has_content:
+        return None
+    
+    text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
+    
+    # Remove existing text scene if it exists
+    if bpy.data.scenes.find(text_scene_name) != -1:
+        bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
+    
+    # Create new text scene
+    text_scene = create_scene(generator_scene, text_scene_name)
+    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
+    
+    # Set up transparent background
+    text_scene.render.film_transparent = True
+    
+    # Enhanced anti-aliasing for better text rendering
+    text_scene.eevee.use_taa_reprojection = True
+    text_scene.eevee.taa_samples = 16
+    
+    # Create world with transparent background
+    world = bpy.data.worlds.new(text_scene.name)
+    text_scene.world = world
+    world.use_nodes = True
+    world.node_tree.nodes.clear()
+    
+    # Add transparent background
+    output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
+    transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
+    transparent_node.inputs[0].default_value = (0, 0, 0, 0)
+    transparent_node.inputs[1].default_value = 0
+    world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
+    
+    # Create text objects with outline
+    y_offset = 0.6
+    text_size = 0.18
+    delay_frames = 0
+    fps = get_fps(text_scene)
+    
+    for field_name, label in text_fields:
+        field_value = getattr(slide.slideshow, field_name, '')
+        if field_value:
+            text_content = f"{label}: {field_value}"
+            
+            # Use outline method for better contrast
+            text_obj = create_typewriter_text_with_improved_outline(
+                text_scene, 
+                text_content,
+                f"{field_name.title()}_Text",
+                location=get_text_location(generator_scene, y_offset, text_size),
+                size=text_size
+            )
+            
+            # Add delay to animation
+            if delay_frames > 0:
+                add_animation_delay_robust(text_obj, delay_frames)
+                # Also add delay to outline if using simple outline method
+                if f"{text_obj.name}_Outline" in text_scene.objects:
+                    outline_obj = text_scene.objects[f"{text_obj.name}_Outline"]
+                    add_animation_delay_robust(outline_obj, delay_frames)
+            
+            y_offset -= 0.35
+            delay_frames += int(fps * 1.2)
+    
+    # Set up camera
+    camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
+    camera.location = (0, 0, 5)
+    text_scene.camera = camera
+    
+    return text_scene
+
+
+def create_slide_text_overlay_scene_robust(generator_scene, slide, slide_duration):
+    """Create a scene with text overlays for a specific slide using robust typewriter effects"""
+    
+    # Check if slide has text data and is enabled
+    if not slide.slideshow.enable_text_overlay:
+        return None
+        
+    text_fields = [
+        ('text_photographer', 'Photo by'),
+        ('text_when', 'When'),
+        ('text_who', 'Who'),
+        ('text_where', 'Where')
+    ]
+    
+    # Check if any text fields have content
+    has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
+    if not has_content:
+        return None
+    
+    text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
+    
+    # Remove existing text scene if it exists
+    if bpy.data.scenes.find(text_scene_name) != -1:
+        bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
+    
+    # Create new text scene
+    text_scene = create_scene(generator_scene, text_scene_name)
+    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
+    
+    # Set up transparent background
+    text_scene.render.film_transparent = True
+    
+    # FIXED: Improved anti-aliasing settings for better text rendering
+    text_scene.eevee.use_taa_reprojection = True
+    text_scene.eevee.taa_samples = 16  # Higher samples for smoother text
+    
+    # Create world with transparent background
+    world = bpy.data.worlds.new(text_scene.name)
+    text_scene.world = world
+    world.use_nodes = True
+    world.node_tree.nodes.clear()
+    
+    # Add transparent background node
+    output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
+    transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
+    transparent_node.inputs[0].default_value = (0, 0, 0, 0)  # Transparent
+    transparent_node.inputs[1].default_value = 0  # No emission
+    world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
+    
+    # FIXED: Improved text positioning and sizing
+    y_offset = 0.6  # Start higher for better positioning
+    text_size = 0.18  # Slightly larger for better readability with improved spacing
+    delay_frames = 0
+    fps = get_fps(text_scene)
+    
+    for field_name, label in text_fields:
+        field_value = getattr(slide.slideshow, field_name, '')
+        if field_value:
+            text_content = f"{label}: {field_value}"
+            text_obj = create_typewriter_text_robust(
+                text_scene, 
+                text_content,
+                f"{field_name.title()}_Text",
+                location=get_text_location(generator_scene, y_offset, text_size),  # Moved further left for better framing
+                size=text_size
+            )
+            
+            # Add delay to this text's animation
+            if delay_frames > 0:
+                add_animation_delay_robust(text_obj, delay_frames)
+            
+            y_offset -= 0.35  # Increased spacing between text lines
+            delay_frames += int(fps * 1.2)  # Slightly longer delay between text elements
+    
+    # Set up camera
+    camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
+    camera.location = (0, 0, 5)
+    text_scene.camera = camera
+    
+    return text_scene
+
+
 def get_material_elements(material, image_name):
-    #Gets the material nodes for the given material.  If the material is corrupted, will recreate and return the fixed one, if image cannot be found, returns None.
     tree = material.node_tree
     nodes = tree.nodes
     texture = None
@@ -294,13 +1210,12 @@ def get_material_elements(material, image_name):
 
 
 def setup_material(material, image):
-    #Setup an image/video material
     material.use_nodes = True
     tree = material.node_tree
     nodes = tree.nodes
     nodes.clear()
 
-    #Create nodes
+    # Create nodes
     texture = nodes.new('ShaderNodeTexImage')
     texture.image = image
     texture.image_user.frame_duration = image.frame_duration
@@ -317,7 +1232,7 @@ def setup_material(material, image):
     output = nodes.new('ShaderNodeOutputMaterial')
     output.location = (400, 0)
 
-    #Connect nodes
+    # Connect nodes
     tree.links.new(texture.outputs[0], shadeless.inputs[0])
     tree.links.new(texture.outputs[0], shaded.inputs[0])
     tree.links.new(shadeless.outputs[0], mix.inputs[1])
@@ -334,7 +1249,6 @@ def setup_material(material, image):
 
 
 def import_slideshow_image(image, image_number, slide_length, generator_scene, video=False, last_image=None):
-    #This function will import an image into the generator scene and create the objects needed for modifying slides in the generator
     if len(image.name) > 20:
         image.name = image.name[0:19]
     if video:
@@ -342,7 +1256,7 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     else:
         print('Importing image '+str(image_number)+', filename: '+image.name)
 
-    #create and set up image plane
+    # Create and set up image plane
     bpy.context.scene.cursor.location = (0.0, 0.0, 0.0)
     ix = ((image.size[0] / image.size[1])/2)
     iy = 0.5
@@ -352,6 +1266,19 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     image_plane.slideshow.name = image_plane.name
     add_constraints(image_plane, 'Plane')
 
+    # NEW: Load text data for this slide
+    text_data = load_slide_text_data(bpy.path.abspath(image.filepath))
+    image_plane.slideshow.text_photographer = text_data['photographer']
+    image_plane.slideshow.text_when = text_data['when']
+    image_plane.slideshow.text_who = text_data['who']
+    image_plane.slideshow.text_where = text_data['where']
+    image_plane.slideshow.has_text_file = text_data['has_text']
+
+# Auto-enable text overlay if text data is found
+    if text_data['has_text'] and any([text_data['photographer'], text_data['when'], 
+                                     text_data['who'], text_data['where']]):
+        image_plane.slideshow.enable_text_overlay = True
+
     if video:
         image_plane.slideshow.locklength = True
         image_plane.slideshow.lockextra = True
@@ -360,13 +1287,13 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         image_plane.slideshow.videofile = image.filepath
         slide_length = image.frame_duration / get_fps(generator_scene)
 
-    #set up and apply material to plane
+    # Set up and apply material to plane
     image_material = bpy.data.materials.new(image_plane.name)
     image_plane.data.uv_layers.new()
-    image_plane.data.materials.append(image_material)  #set material to plane
+    image_plane.data.materials.append(image_material)
     setup_material(image_material, image)
 
-    #set up transform and extras
+    # Set up transform and extras
     if not video:
         randomized = []
         hidden = generator_scene.snu_slideshow_generator.hidden_transforms.split(";")
@@ -412,14 +1339,14 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
             else:
                 extra_texture = generator_scene.snu_slideshow_generator.extra_texture_presets[0].path
 
-        #add target empty
+        # Add target empty
         target_empty = add_object(generator_scene, image_plane.name+' Target', 'EMPTY')
         target_empty.parent = image_plane
         target_empty.empty_display_size = 1
         add_constraints(target_empty, 'Target')
         image_plane.slideshow.target = target_empty.name
 
-        #add view empty
+        # Add view empty
         view_empty = add_object(generator_scene, image_plane.name+' View', 'EMPTY')
         view_empty.parent = image_plane
         view_empty.empty_display_size = 1
@@ -428,7 +1355,7 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         add_constraints(view_empty, 'View')
         image_plane.slideshow.view = view_empty.name
 
-    #add text next to plane saying which index number it is
+    # Add text next to plane saying which index number it is
     index_text = add_object(generator_scene, image_plane.name+' Index', 'FONT')
     index_text.parent = image_plane
     index_text.location = (-1, -.33, 0)
@@ -436,28 +1363,28 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     add_constraints(index_text, 'Text')
 
     if not video:
-        #add text next to plane saying which transform was picked
+        # Add text next to plane saying which transform was picked
         transform_text = add_object(generator_scene, image_plane.name+' Transform', 'FONT')
         transform_text.parent = image_plane
         transform_text.location = (1, 0, 0)
         transform_text.scale = .15, .15, 1
         add_constraints(transform_text, 'Text')
 
-        #add text next to plane saying which extra was picked
+        # Add text next to plane saying which extra was picked
         extra_text = add_object(generator_scene, image_plane.name+' Extra', 'FONT')
         extra_text.parent = image_plane
         extra_text.location = (1, -.25, 0)
         extra_text.scale = .15, .15, 1
         add_constraints(extra_text, 'Text')
 
-    #add text next to plane saying how long the slide is
+    # Add text next to plane saying how long the slide is
     length_text = add_object(generator_scene, image_plane.name+' Length', 'FONT')
     length_text.parent = image_plane
     length_text.location = (1, .25, 0)
     length_text.scale = .15, .15, 1
     add_constraints(length_text, 'Text')
 
-    #create group and add everything to it
+    # Create group and add everything to it
     image_group = bpy.data.collections.new(image_plane.name)
     image_group.objects.link(image_plane)
     image_group.objects.link(index_text)
@@ -468,7 +1395,7 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         image_group.objects.link(extra_text)
         image_group.objects.link(view_empty)
 
-    #additional settings
+    # Additional settings
     image_plane.slideshow.index = image_number + 1
     if not video:
         image_plane.slideshow.length = slide_length
@@ -481,19 +1408,17 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
 
 
 def add_constraints(constraint_object, constraint_type):
-    #This function handles adding constraints to the various objects of the slideshow generator scene
-    #bpy.context.view_layer.objects.active = constraint_object
     rotation_constraint = constraint_object.constraints.new(type='LIMIT_ROTATION')
     location_constraint = constraint_object.constraints.new(type='LIMIT_LOCATION')
     scale_constraint = constraint_object.constraints.new(type='LIMIT_SCALE')
 
-    #set up rotation constraint
+    # Set up rotation constraint
     rotation_constraint.use_limit_x = True
     rotation_constraint.use_limit_y = True
     if constraint_type != 'View':
         rotation_constraint.use_limit_z = True
 
-    #set up local location constraint
+    # Set up local location constraint
     constraint_object.constraints[1].owner_space = 'LOCAL'
     if constraint_type == 'Target' or constraint_type == 'View':
         location_constraint.min_x = -1 * (aspect_ratio(bpy.context.scene)/2)
@@ -513,7 +1438,7 @@ def add_constraints(constraint_object, constraint_type):
     location_constraint.use_max_z = True
     location_constraint.use_min_z = True
 
-    #set up limit scale constraint
+    # Set up limit scale constraint
     scale_constraint.min_x = constraint_object.scale[0]
     scale_constraint.max_x = constraint_object.scale[0]
     scale_constraint.min_y = constraint_object.scale[1]
@@ -528,7 +1453,7 @@ def add_constraints(constraint_object, constraint_type):
         scale_constraint.use_min_z = True
         scale_constraint.use_max_z = True
 
-    #set up text world location limit
+    # Set up text world location limit
     if constraint_type == 'Text':
         limit_location_constraint = constraint_object.constraints.new(type='LIMIT_LOCATION')
         limit_location_constraint.owner_space = 'WORLD'
@@ -572,7 +1497,6 @@ def add_object(scene, name, object_type, mesh_verts=[], mesh_faces=[]):
 
 
 def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, images, previous_image_clip, previous_image_plane):
-    #This function makes the slideshow image scene and adds it to the sequencer of the scene
     base_name = generator_scene.snu_slideshow_generator.base_name
     image_scene_name = base_name + '-' + image_plane.name
 
@@ -588,7 +1512,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene.snu_slideshow_generator.base_name = base_name
         image_scene.eevee.taa_render_samples = generator_scene.snu_slideshow_generator.render_samples
 
-        #Set up image_scene render settings
+        # Set up image_scene render settings
         image_scene_frames = int(get_fps(image_scene) * image_plane.slideshow.length)
         image_scene.frame_end = image_scene_frames
 
@@ -598,13 +1522,13 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene.collection.objects.link(target_empty)
         image_scene.collection.objects.link(view_empty)
 
-        #set up scene world
+        # Set up scene world
         world = bpy.data.worlds.new(image_scene.name)
         image_scene.world = world
         world.use_nodes = False
         world.color = (0, 0, 0)
 
-        #create transforms
+        # Create transforms
         transform_index = get_transform(image_plane.slideshow.transform)
         if transform_index >= 0:
             transform = transforms[transform_index]
@@ -617,7 +1541,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         transform_action = bpy.data.actions.new(transform['name'])
         transform_empty.animation_data.action = transform_action
         aspect = aspect_ratio(image_scene)
-        multiplier = 1.09
         multiplier = 1.375
         if aspect > 1:
             zoffset = aspect * multiplier
@@ -698,14 +1621,14 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         if not transform_empty.animation_data.action_slot:
             transform_empty.animation_data.action_slot = transform_action.slots[0]
 
-        #set up camera location scale and animation
+        # Set up camera location scale and animation
         camera = add_object(image_scene, generator_scene.name+' Camera', 'CAMERA')
         camera.parent = transform_empty
         image_scene.camera = camera
         camera.data.dof.focus_object = image_plane
         camera.data.dof.use_dof = False
 
-        #add camera_scale empty that will scale the transform and camera
+        # Add camera_scale empty that will scale the transform and camera
         camera_scale = add_object(image_scene, generator_scene.name+' Camera Scale', 'EMPTY')
         camera_scale.parent = image_plane
         transform_empty.parent = camera_scale
@@ -714,7 +1637,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         camera_scale_value = (view_empty.scale[1] * 2)
         camera_scale.scale = (camera_scale_value, camera_scale_value, camera_scale_value)
 
-        #run extras script
+        # Run extras script
         if image_plane.slideshow.extra != 'None':
             extra = get_extra(image_plane.slideshow.extra)
             if extra:
@@ -748,9 +1671,8 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                     bpy.context.window.scene = current_scene
                 except ImportError:
                     pass
-        #update_scene(image_scene)
 
-        #Add the image scene to the slideshow scene
+        # Add the image scene to the slideshow scene
         clip = generator_scene.sequence_editor.sequences.new_scene(scene=image_scene, name=image_scene.name, channel=((i % 2) + 1), frame_start=image_scene_start)
 
     else:
@@ -758,7 +1680,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene_frames = image_plane.slideshow.videolength
         rotate = image_plane.slideshow.rotate
 
-        #Decide if a blurred background clip is needed
+        # Decide if a blurred background clip is needed
         aspect = aspect_ratio(generator_scene)
         clipx = image_plane.dimensions[0]
         clipy = image_plane.dimensions[1]
@@ -769,13 +1691,13 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         else:
             blur_background = False
 
-        #Determine channel to put clips in
+        # Determine channel to put clips in
         base_channel = ((i % 2) + 1)
         blur_base_channel = base_channel
         if blur_background:
             base_channel = base_channel + 3
 
-        #Generate video clip(s)
+        # Generate video clip(s)
         bpy.ops.sequencer.select_all(action='DESELECT')
         clip = generator_scene.sequence_editor.sequences.new_movie(filepath=image_plane.slideshow.videofile, name=image_plane.name, channel=base_channel, frame_start=image_scene_start)
         flipped = False
@@ -793,7 +1715,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         else:
             blur_clip = None
 
-        #Set scaling of clip and blur clip
+        # Set scaling of clip and blur clip
         image = get_image(image_plane.slideshow.videofile)
         clip_x = image.size[0]
         clip_y = image.size[1]
@@ -804,15 +1726,15 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         video_aspect = clip_x / clip_y
 
         if video_aspect <= aspect:
-            #video is less wide aspect than the scene, scale to height
+            # video is less wide aspect than the scene, scale to height
             if not flipped:
                 video_scale = scene_y / clip_y
                 blur_scale = scene_x / clip_x
             else:
                 video_scale = scene_y / clip_x
                 blur_scale = scene_x / clip_y
-        else:  #if video_aspect > scene_aspect:
-            #video is more wide aspect than the scene, scale to width
+        else:  # if video_aspect > scene_aspect:
+            # video is more wide aspect than the scene, scale to width
             if not flipped:
                 video_scale = scene_x / clip_x
                 blur_scale = scene_y / clip_y
@@ -826,7 +1748,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             blur_clip.transform.scale_x = blur_scale
             blur_clip.transform.scale_y = blur_scale
 
-        #Add other clips
+        # Add other clips
         speed_clip = None
         audioclip = None
         blur_speed_clip = None
@@ -839,7 +1761,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 audioclip = None
 
             else:
-                #Add fadein/out to audio clip
+                # Add fadein/out to audio clip
                 generator_scene.frame_current = image_scene_start
                 audioclip.volume = 0
                 audioclip.keyframe_insert(data_path='volume')
@@ -873,7 +1795,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 blur_apply_transform = blur_clip
             else:
                 blur_apply_transform = None
-        #Properly scale the clip
+        # Properly scale the clip
         apply_transform.select = True
         if blur_background:
             blur_apply_transform.select = True
@@ -882,7 +1804,7 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             blur_blur_clip.size_x = 40
             blur_blur_clip.size_y = 40
 
-        #Create meta strip
+        # Create meta strip
         generator_scene.sequence_editor.active_strip = clip
         if blur_clip:
             blur_clip.select = True
@@ -899,19 +1821,18 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         bpy.ops.sequencer.meta_make()
         clip = generator_scene.sequence_editor.active_strip
 
-        #Trim video clip
+        # Trim video clip
         offset = image_plane.slideshow.videooffset
         clip.frame_offset_start = offset
         clip.frame_start = image_scene_start - offset
         if image_plane.slideshow.videolength < clip.frame_final_duration:
             clip.frame_final_duration = image_plane.slideshow.videolength
-        #image_scene_frames = int(image_plane.slideshow.length * get_fps(generator_scene))
         if blur_background:
             clip.channel = blur_base_channel
         else:
             clip.channel = base_channel
 
-    #Add fade in
+    # Add fade in
     if i == 0:
         clip.blend_type = 'ALPHA_OVER'
         generator_scene.frame_current = 1
@@ -921,17 +1842,17 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         clip.blend_alpha = 1
         clip.keyframe_insert(data_path='blend_alpha')
 
-    #Add transition
+    # Add transition
     if generator_scene.snu_slideshow_generator.crossfade_length > 0:
         if previous_image_clip and previous_image_plane:
             first_sequence = previous_image_clip
             second_sequence = clip
             if previous_image_plane.slideshow.transition == "GAMMA_CROSS":
                 effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='GAMMA_CROSS', seq1=first_sequence, seq2=second_sequence)
-                effect.frame_still_end = first_sequence.frame_final_end  #apparently needed since the frame_end doesnt get set in the previous function...
+                effect.frame_still_end = first_sequence.frame_final_end
             elif previous_image_plane.slideshow.transition == "WIPE":
                 effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='WIPE', seq1=first_sequence, seq2=second_sequence)
-                effect.frame_still_end = first_sequence.frame_final_end  #apparently needed since the frame_end doesnt get set in the previous function...
+                effect.frame_still_end = first_sequence.frame_final_end
                 effect.transition_type = previous_image_plane.slideshow.wipe_type
                 effect.direction = previous_image_plane.slideshow.wipe_direction
                 if previous_image_plane.slideshow.wipe_soft:
@@ -953,13 +1874,13 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 if second_sequence.channel > effect_channel:
                     effect_channel = second_sequence.channel
                 if second_sequence.channel > first_sequence.channel:
-                    #second sequence is above first, transitions are normal
+                    # second sequence is above first, transitions are normal
                     inverted = False
                     start_color = (0, 0, 0)
                     end_color = (1, 1, 1)
                     apply_mask_to = second_sequence
                 else:
-                    #first sequence is above second, transitions are inverted
+                    # first sequence is above second, transitions are inverted
                     inverted = True
                     start_color = (1, 1, 1)
                     end_color = (0, 0, 0)
@@ -996,10 +1917,9 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 pass
             else:
                 # Create a cross-fade effect strip that transitions between the two images.
-                # effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', seq1=first_sequence, seq2=second_sequence)
                 effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', input1=first_sequence, input2=second_sequence)
 
-    #Add fade out
+    # Add fade out
     if i == (len(images) - 1):
         clip.blend_type = 'ALPHA_OVER'
         generator_scene.frame_current = int(image_scene_start + image_scene_frames)
@@ -1014,7 +1934,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
 
 
 def extras_path():
-    #This function will return the path to the Extras files
     script_file = os.path.realpath(__file__)
     directory = os.path.dirname(script_file)
     extras_directory = directory+os.path.sep+'Extras'+os.path.sep
@@ -1024,7 +1943,6 @@ def extras_path():
 
 
 def list_extras():
-    #This function will return a list of Extras found in the extras path location
     extras = []
     extraspath = extras_path()
     extrafiles = glob.glob(extraspath+'*')
@@ -1035,7 +1953,6 @@ def list_extras():
 
 
 def get_extra(filename):
-    #This function will return the full path to an extra from the filename
     extra = None
     extraspath = extras_path()
     extrafiles = glob.glob(extraspath+'*')
@@ -1046,7 +1963,6 @@ def get_extra(filename):
 
 
 def get_transform(name):
-    #This function will return a transform from the name
     for index, transform in enumerate(transforms):
         if transform['name'] == name:
             return index
@@ -1054,14 +1970,12 @@ def get_transform(name):
 
 
 def update_slide_length(self, context):
-    #Callback for SlideshowImage.length to update the length display text
     current_scene = context.scene
     length_text = current_scene.objects[self.name+" Length"]
     length_text.data.body = "Length: "+str(round(self.length, 2))+" Seconds"
 
 
 def update_video_length(self, context):
-    #callback for SlideshowImage.videolength to update the length display text
     current_scene = context.scene
     length_text = current_scene.objects[self.name+" Length"]
     if self.videolength + self.videooffset > self.videomaxlength:
@@ -1070,7 +1984,6 @@ def update_video_length(self, context):
 
 
 def update_offset(self, context):
-    #Callback for SlideshowImage.videooffset to update the image texture's offset
     current_scene = context.scene
     image_plane = current_scene.objects[self.name]
     material = image_plane.material_slots[0].material
@@ -1088,7 +2001,6 @@ def update_offset(self, context):
 
 
 def update_extra(self, context):
-    #Callback for SlideshowImage.extra to update the extra display text
     try:
         current_scene = context.scene
         extra_text = current_scene.objects[self.name+" Extra"]
@@ -1098,7 +2010,6 @@ def update_extra(self, context):
 
 
 def update_transform(self, context):
-    #Callback for SlideshowImage.transform to update the transform display text
     try:
         current_scene = context.scene
         transform_text = current_scene.objects[self.name+" Transform"]
@@ -1108,7 +2019,6 @@ def update_transform(self, context):
 
 
 def update_index(self, context):
-    #Callback for SlideshowImage.index to update the index display text, and the position of the image plane
     current_scene = context.scene
     image_plane = current_scene.objects[self.name]
     position = -self.index
@@ -1118,7 +2028,6 @@ def update_index(self, context):
 
 
 def update_rotate(self, context):
-    #Callback for SlideshowImage.rotate to update the rotation of the image plane
     current_scene = context.scene
     image_plane = current_scene.objects[self.name]
     mesh = image_plane.data
@@ -1155,7 +2064,6 @@ def update_rotate(self, context):
 
 
 def list_slides(scene):
-    #This function returns an unordered list of the slideshow images in the generator scene
     slides = []
     for slide_object in scene.objects:
         if slide_object.slideshow.name == slide_object.name:
@@ -1196,24 +2104,18 @@ def update_aspect(slide, scene, aspect):
 
 
 def update_order(mode='none', current_scene=None):
-    #This function is called by the modal autoupdate and by various operators.  It arranges and positions the slides in the way they need to be.
-    #   Setting 'mode' to 'none' will place the slides in the exact positions they should be, and update their index values
-    #   Setting 'mode' to 'random' will rearrange the slides in a random order
-    #   Setting 'mode' to 'alphabetical' will arrange the slides in alphabetical order
-    #   Setting 'mode' to 'reverse' will arrange the slides in reverse alphabetical order
-
     if not current_scene:
         current_scene = bpy.context.scene
     slides = list_slides(current_scene)
 
     if mode == 'none':
-        #Sort slides by their current location only
+        # Sort slides by their current location only
         changed = False
         oldorder = []
         aspect = round(aspect_ratio(current_scene), 4)
         old_aspect = round(current_scene.snu_slideshow_generator.aspect_ratio, 4)
         for slide in slides:
-            #check if aspect has changed, update slides if needed
+            # check if aspect has changed, update slides if needed
             if aspect != old_aspect:
                 update_aspect(slide, current_scene, aspect)
             loc = -slide.location[1]
@@ -1227,18 +2129,18 @@ def update_order(mode='none', current_scene=None):
         if changed:
             update_scene(current_scene)
     else:
-        #Resort the slides in a specific way
+        # Resort the slides in a specific way
 
-        #Sort the slides by index to start with
+        # Sort the slides by index to start with
         slides.sort(key=lambda x: x.slideshow.index)
 
-        #Make a list of only the slides that are not locked
+        # Make a list of only the slides that are not locked
         unfrozen_indices, unfrozen_subset = zip(*[(i, e) for i, e in enumerate(slides) if not e.slideshow.lockposition])
         unfrozen_indices = list(unfrozen_indices)
         unfrozen_subset = list(unfrozen_subset)
 
         if mode == 'random':
-            #Shuffle the index values of the unlocked slides
+            # Shuffle the index values of the unlocked slides
             random.shuffle(unfrozen_indices)
         elif mode == 'alphabetical':
             unfrozen_subset.sort(key=lambda x: x.slideshow.name)
@@ -1246,11 +2148,11 @@ def update_order(mode='none', current_scene=None):
             unfrozen_subset.sort(key=lambda x: x.slideshow.name)
             unfrozen_subset.reverse()
 
-        #Recombine the sorted indexes and slides
+        # Recombine the sorted indexes and slides
         for i, e in zip(unfrozen_indices, unfrozen_subset):
             slides[i] = e
 
-        #Reenter the slide indexes
+        # Reenter the slide indexes
         for i, slide in enumerate(slides):
             slide.slideshow.index = i
 
@@ -1264,139 +2166,327 @@ def get_first_3d_view():
     return None
 
 
+# PROPERTY GROUPS (Updated with text overlay properties)
 class SnuSlideshowExtraTexturePreset(bpy.types.PropertyGroup):
-    #A property group for a texture preset for the extra scenes
+    """A property group for a texture preset for the extra scenes"""
     name: bpy.props.StringProperty(
         name="Texture Name",
-        default="None")
+        default="None"
+    )
     path: bpy.props.StringProperty(
         name="Texture Path",
-        default="None")
+        default="None"
+    )
 
 
 class SnuSlideshowImage(bpy.types.PropertyGroup):
-    #A property group that contains the information needed for a slideshow image.  This is appended to a slide image plane object.
+    """A property group that contains the information needed for a slideshow image"""
     name: bpy.props.StringProperty(
         name="Image Name",
-        default="None")
+        default="None"
+    )
     transform: bpy.props.StringProperty(
         name="Transform Type Name",
         default="None",
-        update=update_transform)
+        update=update_transform
+    )
     transform_interpolation: bpy.props.EnumProperty(
         name="Transform Interpolation",
         default="BEZIER",
-        items=[("BEZIER", "Bezier", "", 1), ("LINEAR", "Linear", "", 2)])
+        items=[
+            ("BEZIER", "Bezier", "", 1), 
+            ("LINEAR", "Linear", "", 2)
+        ]
+    )
     length: bpy.props.FloatProperty(
         name="Slide Length (Seconds)", 
-        default=4, 
-        min=1,
+        default=4.0, 
+        min=1.0,
         update=update_slide_length,
-        description="Slide Length In Seconds")
+        description="Slide Length In Seconds"
+    )
     videooffset: bpy.props.IntProperty(
         name="Video Offset (Frames)",
         default=0,
         min=0,
         description="Video Offset In Frames",
-        update=update_offset)
+        update=update_offset
+    )
     videoaudio: bpy.props.BoolProperty(
         name="Enable Audio",
         default=True,
-        description="Import Audio Track When Importing Video")
+        description="Import Audio Track When Importing Video"
+    )
     videomaxlength: bpy.props.IntProperty(
         name="Video Maximum Length",
-        default=0)
+        default=0
+    )
     videolength: bpy.props.IntProperty(
         name="Slide Length (Frames)",
         default=1,
         min=0,
         update=update_video_length,
-        description="Video Slide Length In Frames")
+        description="Video Slide Length In Frames"
+    )
     videofile: bpy.props.StringProperty(
         name="Video Filename",
-        default="")
+        default=""
+    )
     extra: bpy.props.StringProperty(
         name="Extra Type", 
         default="None",
-        update=update_extra)
+        update=update_extra
+    )
     imageplane: bpy.props.StringProperty(
         name="Image Plane Name", 
-        default="None")
+        default="None"
+    )
     target: bpy.props.StringProperty(
         name="Target Empty Name", 
-        default="None")
+        default="None"
+    )
     view: bpy.props.StringProperty(
         name="View Window Empty Name", 
-        default="None")
+        default="None"
+    )
     extraamount: bpy.props.FloatProperty(
         name="Amount For The Extra Scene",
         default=0.5,
-        max=1,
-        min=0,
-        description="Determines the power of the effect for the extra scene - 0.5 is average")
+        max=1.0,
+        min=0.0,
+        description="Determines the power of the effect for the extra scene - 0.5 is average"
+    )
     extratext: bpy.props.StringProperty(
         name="Text For The Extra Scene",
         default="None",
-        description="Used for extra scenes with a text object")
+        description="Used for extra scenes with a text object"
+    )
     extratexture: bpy.props.StringProperty(
         name="Texture For The Extra Scene",
         default="None",
-        description="Used for extra scenes with a video background or overlay")
+        description="Used for extra scenes with a video background or overlay"
+    )
     index: bpy.props.IntProperty(
         name="Image Index",
         default=0,
-        update=update_index)
+        update=update_index
+    )
     lockposition: bpy.props.BoolProperty(
         name="Lock Position",
-        default=False)
+        default=False
+    )
     locktransform: bpy.props.BoolProperty(
         name="Lock Transform",
-        default=False)
+        default=False
+    )
     lockextra: bpy.props.BoolProperty(
         name="Lock Extra",
-        default=False)
+        default=False
+    )
     locklength: bpy.props.BoolProperty(
         name="Lock Length",
-        default=False)
+        default=False
+    )
     locktransition: bpy.props.BoolProperty(
         name="Lock Transition",
-        default=False)
+        default=False
+    )
     rotate: bpy.props.EnumProperty(
         name="Rotation",
-        items=[('0', '0', '0'), ('90', '90', '90'), ('180', '180', '180'), ('-90', '-90', '-90')],
-        update=update_rotate)
+        items=[
+            ('0', '0', '0'), 
+            ('90', '90', '90'), 
+            ('180', '180', '180'), 
+            ('-90', '-90', '-90')
+        ],
+        update=update_rotate
+    )
     videobackground: bpy.props.BoolProperty(
         name="Blurred Background",
         default=True,
-        description="When the video is smaller than the render resolution, add a blurred scaled background instead of black")
+        description="When the video is smaller than the render resolution, add a blurred scaled background instead of black"
+    )
     transition: bpy.props.EnumProperty(
         name="Transition Type",
         default="CROSS",
-        items=[("CROSS", "Crossfade", "", 1), ("GAMMA_CROSS", "Gamma Cross", "", 2), ("WIPE", "Wipe", "", 3), ("CUSTOM", "Custom", "", 4), ("NONE", "None", "", 5)])
+        items=[
+            ("CROSS", "Crossfade", "", 1), 
+            ("GAMMA_CROSS", "Gamma Cross", "", 2), 
+            ("WIPE", "Wipe", "", 3), 
+            ("CUSTOM", "Custom", "", 4), 
+            ("NONE", "None", "", 5)
+        ]
+    )
     wipe_type: bpy.props.EnumProperty(
         name="Wipe Type",
         default="SINGLE",
-        items=[("SINGLE", "Single", "", 1), ("DOUBLE", "Double", "", 2), ("IRIS", "Iris", "", 3), ("CLOCK", "Clock", "", 4)])
+        items=[
+            ("SINGLE", "Single", "", 1), 
+            ("DOUBLE", "Double", "", 2), 
+            ("IRIS", "Iris", "", 3), 
+            ("CLOCK", "Clock", "", 4)
+        ]
+    )
     wipe_direction: bpy.props.EnumProperty(
         name="Wipe Direction",
         default="OUT",
-        items=[("OUT", "Out", "", 1), ("IN", "In", "", 2)])
+        items=[
+            ("OUT", "Out", "", 1), 
+            ("IN", "In", "", 2)
+        ]
+    )
     wipe_soft: bpy.props.BoolProperty(
         name="Soft Wipe",
-        default=True)
+        default=True
+    )
     wipe_angle: bpy.props.EnumProperty(
         name="Wipe Angle",
         default="DOWN",
-        items=[("DOWN", "Down", "", 1), ("RIGHT", "Right", "", 2), ("UP", "Up", "", 3), ("LEFT", "Left", "", 4)])
+        items=[
+            ("DOWN", "Down", "", 1), 
+            ("RIGHT", "Right", "", 2), 
+            ("UP", "Up", "", 3), 
+            ("LEFT", "Left", "", 4)
+        ]
+    )
     custom_transition_file: bpy.props.StringProperty(
         name="Transition File",
         default="",
         description="Location of custom transition file.",
-        subtype='FILE_PATH')
+        subtype='FILE_PATH'
+    )
+    
+    # NEW: Per-slide text overlay properties
+    text_photographer: bpy.props.StringProperty(
+        name="Photographer",
+        default="",
+        description="Photographer credit for this slide"
+    )
+    text_when: bpy.props.StringProperty(
+        name="When",
+        default="",
+        description="When this photo was taken"
+    )
+    text_who: bpy.props.StringProperty(
+        name="Who",
+        default="",
+        description="Who is in this photo"
+    )
+    text_where: bpy.props.StringProperty(
+        name="Where",
+        default="",
+        description="Where this photo was taken"
+    )
+    has_text_file: bpy.props.BoolProperty(
+        name="Has Text File",
+        default=False,
+        description="Whether a corresponding text file was found for this slide"
+    )
+    enable_text_overlay: bpy.props.BoolProperty(
+        name="Enable Text Overlay",
+        default=False,
+        description="Enable text overlay for this individual slide"
+    )
 
 
+class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
+    text_alignment: EnumProperty(
+        name="Text Alignment",
+        description="Horizontal alignment for overlay text",
+        items=[
+            ('LEFT', "Left", "Left aligned text"),
+            ('CENTER', "Center", "Centered text"),
+            ('RIGHT', "Right", "Right aligned text"),
+        ],
+        default='LEFT'
+    )
+
+    """Main settings for the slideshow generator"""
+    is_generator_scene: bpy.props.BoolProperty(
+        default=False
+    )
+    hidden_transforms: bpy.props.StringProperty(
+        name="Hidden Transforms",
+        default="",
+        description="List of transforms to not use in randomize operations"
+    )
+    hidden_extras: bpy.props.StringProperty(
+        name="Hidden Extras",
+        default="Text Normal Bottom;Text Normal Top;Video Background;Video Background With Shadows;Video Foreground;Compositor Glare;Overlay Curves Left;Overlay Curves Right",
+        description="List of extras to not use in randomize operations"
+    )
+    image_directory: bpy.props.StringProperty(
+        name="Image Directory",
+        default='/Images/',
+        description="Location of images used in slideshow",
+        subtype='DIR_PATH'
+    )
+    slide_length: bpy.props.FloatProperty(
+        name="Slide Length (Seconds)",
+        default=4.0,
+        min=1.0,
+        max=20.0,
+        description="Slide Scene Length In Seconds"
+    )
+    crossfade_length: bpy.props.IntProperty(
+        name="Crossfade Length (Frames)",
+        default=10,
+        min=0,
+        max=120
+    )
+    extra_texture: bpy.props.StringProperty(
+        name="Extra Texture",
+        default="None"
+    )
+    extra_texture_presets: bpy.props.CollectionProperty(
+        type=SnuSlideshowExtraTexturePreset
+    )
+    audio_enabled: bpy.props.BoolProperty(
+        default=False
+    )
+    audio_track: bpy.props.StringProperty(
+        name="Audio Track",
+        default="None"
+    )
+    audio_fade_length: bpy.props.IntProperty(
+        name="Fade Out",
+        description="Length of audio fade out in frames",
+        default=30,
+        min=0,
+        max=600
+    )
+    audio_loop_fade: bpy.props.IntProperty(
+        name="Loop Overlap",
+        description="Length of audio overlap when track is looped in frames",
+        default=60,
+        min=0,
+        max=600
+    )
+    base_name: bpy.props.StringProperty(
+        name="Base Name For Created Scenes",
+        default=''
+    )
+    generator_name: bpy.props.StringProperty(
+        name="Generator Scene Name",
+        default=''
+    )
+    generator_workspace: bpy.props.StringProperty(
+        name="Generator Scene Workspace",
+        default=''
+    )
+    aspect_ratio: bpy.props.FloatProperty(
+        default=0.0
+    )
+    render_samples: bpy.props.IntProperty(
+        min=0,
+        default=24,
+        max=128
+    )
+
+
+# PANELS (Updated UI)
 class SSG_PT_VSEPanel(bpy.types.Panel):
-    #This is the panel that is visible in the VSE of the 'Slideshow' scene.
+    """Panel visible in the VSE of the 'Slideshow' scene"""
     bl_label = "Snu Slideshow Generator"
     bl_space_type = 'SEQUENCE_EDITOR'
     bl_region_type = 'UI'
@@ -1404,7 +2494,6 @@ class SSG_PT_VSEPanel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        #Check if in slideshow scene
         if context.scene.snu_slideshow_generator.is_generator_scene:
             try:
                 if len(context.scene.sequence_editor.sequences_all) > 0:
@@ -1417,54 +2506,14 @@ class SSG_PT_VSEPanel(bpy.types.Panel):
             return False
 
     def draw(self, context):
-        del context
         layout = self.layout
         layout.operator('slideshow.preview_mode', text="Apply 50% Render Size").mode = 'halfsize'
         layout.operator('slideshow.preview_mode', text="Apply 100% Render Size").mode = 'fullsize'
         layout.operator('slideshow.gotogenerator', text="Return To The Generator")
 
 
-class SnuSlideshowGotoGenerator(bpy.types.Operator):
-    #This operator will attempt to go back to the slideshow scene and default screen mode so the slides can be edited and re-generated
-    bl_idname = 'slideshow.gotogenerator'
-    bl_label = "Return To The Generator Scene"
-
-    def execute(self, context):
-        workspace_name = context.scene.snu_slideshow_generator.generator_workspace
-        if workspace_name in bpy.data.workspaces:
-            workspace = bpy.data.workspaces[workspace_name]
-            context.window.workspace = workspace
-        return{'FINISHED'}
-
-
-class SnuSlideshowPreviewMode(bpy.types.Operator):
-    #This operator will enable or disable 'preview' mode on all scene strips in the sequencer.
-    #'mode' can be set to:
-    #   halfsize - Set the rendering to 50% size
-    #   fullsize - Set the rendering to 100% size
-    bl_idname = 'slideshow.preview_mode'
-    bl_label = 'Enable or Disable Preview On All Scenes'
-
-    mode: bpy.props.StringProperty()
-
-    def execute(self, context):
-        sequences = context.scene.sequence_editor.sequences_all
-        for sequence in sequences:
-            if sequence.type == 'SCENE':
-                scene = sequence.scene
-                if self.mode == 'halfsize':
-                    sequence.transform.scale_x = 2
-                    sequence.transform.scale_y = 2
-                    scene.render.resolution_percentage = 50
-                elif self.mode == 'fullsize':
-                    sequence.transform.scale_x = 1
-                    sequence.transform.scale_y = 1
-                    scene.render.resolution_percentage = 100
-        return{'FINISHED'}
-
-
 class SSG_PT_Panel(bpy.types.Panel):
-    #This is the main configuration panel for the slideshow generator and generator creator
+    """Main configuration panel for the slideshow generator"""
     bl_label = "Snu Slideshow Generator"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1474,16 +2523,17 @@ class SSG_PT_Panel(bpy.types.Panel):
         layout = self.layout
         current_scene = context.scene
         fps = get_fps(current_scene)
+        
         if is_generator_scene(current_scene):
-            #Panel is in slideshow generator mode
+            # Panel is in slideshow generator mode
             slides = list_slides(current_scene)
             row = layout.row()
             if len(slides):
-                layout.operator_context = 'INVOKE_SCREEN'  #needed to solve issues with context.scene not updating
+                layout.operator_context = 'INVOKE_SCREEN'
                 row.operator('slideshow.create')
 
                 row = layout.row()
-                #Calculate and display slideshow length
+                # Calculate and display slideshow length
                 slideshow_seconds = slideshow_length(slides=slides, fps=fps)
                 slideshow_length_formatted = format_seconds(slideshow_seconds)
                 row.label(text=str(len(slides)) + " Slides, Total Length: "+slideshow_length_formatted)
@@ -1494,6 +2544,8 @@ class SSG_PT_Panel(bpy.types.Panel):
             row.prop(context.scene.snu_slideshow_generator, "crossfade_length")
             row = layout.row()
             row.prop(context.scene.snu_slideshow_generator, "render_samples")
+            
+            # Audio section
             row = layout.row()
             box = row.box()
             row = box.row()
@@ -1513,7 +2565,7 @@ class SSG_PT_Panel(bpy.types.Panel):
             row.separator()
 
             if len(slides):
-                #Sorting options
+                # Sorting options
                 row = layout.row(align=True)
                 row.label(text='Sort:')
                 row.operator('slideshow.update_order', text='Randomize').mode = 'random'
@@ -1531,7 +2583,7 @@ class SSG_PT_Panel(bpy.types.Panel):
                 row.operator('slideshow.delete_slide')
 
         else:
-            #Panel is in create generator mode
+            # Panel is in create generator mode
             row = layout.row()
             row.prop(context.scene.snu_slideshow_generator, "image_directory")
             row = layout.row()
@@ -1540,7 +2592,8 @@ class SSG_PT_Panel(bpy.types.Panel):
             row.operator('slideshow.generator', text='New Slideshow Scene').mode = 'new'
             row = layout.row()
             row.operator('slideshow.generator', text='Slideshow In This Scene').mode = 'direct'
-            #get list of images in image_directory, gray out generator button if none found
+            
+            # Get list of images in image_directory
             image_types = get_extensions_image()
             image_list = []
             for image_type in image_types:
@@ -1549,11 +2602,9 @@ class SSG_PT_Panel(bpy.types.Panel):
             for video_type in video_types:
                 image_list.extend(glob.glob(bpy.path.abspath(context.scene.snu_slideshow_generator.image_directory)+'*'+video_type))
             if not image_list:
-                #row.enabled = False
                 row = layout.row()
                 row.label(text="Image Directory Invalid Or Empty")
             else:
-                #row.enabled = True
                 row = layout.row()
                 slideshow_seconds = slideshow_length(slides=image_list, fps=fps)
                 slideshow_length_formatted = format_seconds(slideshow_seconds)
@@ -1582,7 +2633,7 @@ class SSG_PT_Panel(bpy.types.Panel):
 
 
 class SSG_PT_SlidePanel(bpy.types.Panel):
-    #This panel contains settings for the currently selected slideshow image
+    """Panel containing settings for the currently selected slideshow image"""
     bl_label = "Slideshow Image"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1601,7 +2652,7 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
 
         selected = context.active_object
         if hasattr(selected, 'slideshow') and selected.slideshow.name != "None":
-            #If a slide image is selected, display configuration options
+            # If a slide image is selected, display configuration options
             current_slide = selected.slideshow
             row = layout.row()
             row.label(text="Image: "+current_slide.name)
@@ -1617,6 +2668,42 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             subsplit.operator("slideshow.move_slide", text="", icon="FF").move = "end"
             split = split.split()
             split.prop(current_slide, "lockposition")
+            
+            # UPDATED: Text overlay section for individual slides
+            if current_slide.has_text_file:
+                innerbox = layout.box()
+                row = innerbox.row()
+                row.label(text="Text Overlay (Auto-detected)", icon='FILE_TEXT')
+                row = innerbox.row()
+                row.prop(current_slide, "enable_text_overlay", text="Enable Text Overlay for This Slide")
+                
+                if current_slide.enable_text_overlay:
+                    # Show the text data that was loaded
+                    if current_slide.text_photographer:
+                        row = innerbox.row()
+                        row.label(text=f"Photographer: {current_slide.text_photographer}")
+                    if current_slide.text_when:
+                        row = innerbox.row()
+                        row.label(text=f"When: {current_slide.text_when}")
+                    if current_slide.text_who:
+                        row = innerbox.row()
+                        row.label(text=f"Who: {current_slide.text_who}")
+                    if current_slide.text_where:
+                        row = innerbox.row()
+                        row.label(text=f"Where: {current_slide.text_where}")
+                    
+                    # Allow manual editing
+                    row = innerbox.row()
+                    row.label(text="Edit Text Data:")
+                    row = innerbox.row()
+                    row.prop(current_slide, "text_photographer", text="Photographer")
+                    row = innerbox.row()
+                    row.prop(current_slide, "text_when", text="When")
+                    row = innerbox.row()
+                    row.prop(current_slide, "text_who", text="Who")
+                    row = innerbox.row()
+                    row.prop(current_slide, "text_where", text="Where")
+            
             innerbox = layout.box()
             row = innerbox.row()
             if current_slide.videofile:
@@ -1697,7 +2784,7 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             row.label(text="Drag an image up or down to rearrange it in the timeline.")
 
         elif 'View' in selected.name:
-            #The view area rectangle is probably selected
+            # The view area rectangle is probably selected
             row = layout.box()
             row.label(text="The rectangle is the area the camera will see.")
             row.label(text="It can be scaled down to crop the image,")
@@ -1705,24 +2792,56 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             row.label(text="or moved to focus on a specific area.")
 
         elif 'Target' in selected.name:
-            #The zoom to target is probably selected
+            # The zoom to target is probably selected
             row = layout.box()
             row.label(text="The cross is the target for transforms like zoom in.")
             row.label(text="It can be moved around the image.")
 
         else:
-            #Something else is selected
+            # Something else is selected
             row = layout.box()
             row.label(text="Select An Image To Customize It")
 
 
+# OPERATORS
+class SnuSlideshowGotoGenerator(bpy.types.Operator):
+    """Return to the slideshow generator scene"""
+    bl_idname = 'slideshow.gotogenerator'
+    bl_label = "Return To The Generator Scene"
+
+    def execute(self, context):
+        workspace_name = context.scene.snu_slideshow_generator.generator_workspace
+        if workspace_name in bpy.data.workspaces:
+            workspace = bpy.data.workspaces[workspace_name]
+            context.window.workspace = workspace
+        return{'FINISHED'}
+
+
+class SnuSlideshowPreviewMode(bpy.types.Operator):
+    """Enable or disable 'preview' mode on all scene strips"""
+    bl_idname = 'slideshow.preview_mode'
+    bl_label = 'Enable or Disable Preview On All Scenes'
+
+    mode: bpy.props.StringProperty()
+
+    def execute(self, context):
+        sequences = context.scene.sequence_editor.sequences_all
+        for sequence in sequences:
+            if sequence.type == 'SCENE':
+                scene = sequence.scene
+                if self.mode == 'halfsize':
+                    sequence.transform.scale_x = 2
+                    sequence.transform.scale_y = 2
+                    scene.render.resolution_percentage = 50
+                elif self.mode == 'fullsize':
+                    sequence.transform.scale_x = 1
+                    sequence.transform.scale_y = 1
+                    scene.render.resolution_percentage = 100
+        return{'FINISHED'}
+
+
 class SnuSlideshowMoveSlide(bpy.types.Operator):
-    #Operator for moving the current active slideshow slide up or down in the generator scene.
-    #'move' can be:
-    #   'forward' for moving it one space forward
-    #   'backward' for moving it one space back
-    #   'beginning' for moving it to the start of the slideshow
-    #   'end' for moving it to the end of the slideshow
+    """Move the active slideshow slide up or down in the generator scene"""
     bl_idname = 'slideshow.move_slide'
     bl_label = "Move The Active Slide"
 
@@ -1746,17 +2865,14 @@ class SnuSlideshowMoveSlide(bpy.types.Operator):
 
 
 class SnuSlideshowOpenExtraTexture(bpy.types.Operator):
-    #This operator will open a filebrowser to select the scene.snu_slideshow_generator.extra_texture variable
+    """Open a filebrowser to select an extra texture file"""
     bl_idname = 'slideshow.open_extra_texture'
     bl_label = 'Browse For An Image Or Video File'
 
-    #The browsed to file is stored in this variable
     filepath: bpy.props.StringProperty()
-
     target: bpy.props.StringProperty()
 
     def invoke(self, context, event):
-        del event
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1767,26 +2883,22 @@ class SnuSlideshowOpenExtraTexture(bpy.types.Operator):
         context.space_data.params.use_filter_folder = True
 
     def execute(self, context):
-        #This function is called when the file browser dialog is closed with an ok
         if self.target == 'slide':
             current_slide = context.active_object
             current_slide.slideshow.extratexture = self.filepath
         else:
             context.scene.snu_slideshow_generator.extra_texture = self.filepath
-
         return{'FINISHED'}
 
 
 class SnuSlideshowOpenAudio(bpy.types.Operator):
-    #This operator will open a filebrowser to select the scene.snu_slideshow_generator.audio_track variable
+    """Open a filebrowser to select an audio file"""
     bl_idname = 'slideshow.open_audio'
     bl_label = 'Browse For An Audio File'
 
-    #The browsed to file is stored in this variable
     filepath: bpy.props.StringProperty()
 
     def invoke(self, context, event):
-        del event
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1796,28 +2908,25 @@ class SnuSlideshowOpenAudio(bpy.types.Operator):
         context.space_data.params.use_filter_folder = True
 
     def execute(self, context):
-        #This function is called when the file browser dialog is closed with an ok
         generator_scene = context.scene
         generator_scene.snu_slideshow_generator.audio_track = self.filepath
         return{'FINISHED'}
 
 
 class SnuSlideshowAddSlide(bpy.types.Operator):
-    #This operator will add a new slide to the slideshow generator scene.
+    """Add new slide(s) to the slideshow generator scene"""
     bl_idname = 'slideshow.add_slide'
     bl_label = 'Add New Slide(s)'
 
-    #The files selected by the browser are stored in this
     files: bpy.props.CollectionProperty(
         name="File Path",
-        type=bpy.types.OperatorFileListElement)
-
-    #The browsed to directory is stored in this variable
+        type=bpy.types.OperatorFileListElement
+    )
     directory: bpy.props.StringProperty(
-        subtype="DIR_PATH")
+        subtype="DIR_PATH"
+    )
 
     def invoke(self, context, event):
-        del event
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1828,36 +2937,30 @@ class SnuSlideshowAddSlide(bpy.types.Operator):
         context.space_data.params.use_filter_folder = True
 
     def execute(self, context):
-        #This function is called when the file browser dialog is closed with an ok
         generator_scene = context.scene
         import os
 
-        #iterate through the selected files and attempt to load them into the generator scene
         last_image = None
         for fileelement in self.files:
             filename = os.path.join(self.directory, fileelement.name)
             if os.path.isfile(filename):
-                #The file is a real file
                 extension = os.path.splitext(filename)[1].lower()
                 if extension in get_extensions_image():
-                    #The file is a known image file type, load it
                     image = load_image(filename)
                     image_number = len(list_slides(generator_scene))
                     last_image = import_slideshow_image(image, image_number, generator_scene.snu_slideshow_generator.slide_length, generator_scene, video=False, last_image=last_image)
                 elif extension in get_extensions_video():
-                    #The file is a known video file type, load it
                     image = load_image(filename)
                     image_number = len(list_slides(generator_scene))
                     last_image = import_slideshow_image(image, image_number, generator_scene.snu_slideshow_generator.slide_length, generator_scene, video=True, last_image=last_image)
                 else:
-                    #oops, this file is not an image or video
                     self.report({'WARNING'}, os.path.split(filename)[1]+' Is Not An Image')
         select_plane(last_image, generator_scene)
         return{'FINISHED'}
 
 
 class SnuSlideshowExtraMenu(bpy.types.Menu):
-    #This is the popup menu for selecting or toggling extras
+    """Popup menu for selecting or toggling extras"""
     bl_idname = 'SSG_MT_extra_menu'
     bl_label = 'List of available extras'
 
@@ -1867,52 +2970,40 @@ class SnuSlideshowExtraMenu(bpy.types.Menu):
         split = layout.split()
         column = split.column()
 
-        #Display the 'None' extra
         is_generator = is_generator_scene(scene)
         if is_generator:
-            #This is the slideshow generator scene, the extra can be selected
             column.operator("slideshow.change_extra", text="None").extra = "None"
         else:
-            #This is not the slideshow generator scene, the extra can only be toggled
             column.operator("slideshow.hide_extra", text="None").extra = "None"
         extras = list_extras()
 
-        #Iterate through the extras to display the extra name column
         for extra in extras:
             if extra != 'None':
                 if is_generator:
-                    #This is the slideshow generator scene, the extra can be selected
                     column.operator("slideshow.change_extra", text=extra).extra = extra
                 else:
-                    #This is not the slideshow generator scene, the extra can only be toggled
                     column.operator("slideshow.hide_extra", text=extra).extra = extra
         column = split.column()
 
-        #Display the toggled extra checkboxes
         hidden = scene.snu_slideshow_generator.hidden_extras.split(";")
 
-        #Display the 'None' extra checkbox
         if "None" in hidden:
             column.operator("slideshow.hide_extra", text="", icon="CHECKBOX_DEHLT").extra = "None"
         else:
             column.operator("slideshow.hide_extra", text="", icon="CHECKBOX_HLT").extra = "None"
 
-        #Iterate through the extras and display the toggle extra checkboxes
         for extra in extras:
             if extra != 'None':
                 if extra in hidden:
-                    #This extra is currently disabled
                     column.operator("slideshow.hide_extra", text="", icon="CHECKBOX_DEHLT").extra = extra
                 else:
-                    #This extra is currently enabled
                     column.operator("slideshow.hide_extra", text="", icon="CHECKBOX_HLT").extra = extra
 
-        #This will toggle all extras on and off
         column.operator("slideshow.hide_all_extras", text="Toggle All")
 
 
 class SnuSlideshowHideAllExtras(bpy.types.Operator):
-    #This operator will enable all extras if none are enabled, otherwise it will disable all
+    """Toggle all extras on and off"""
     bl_idname = 'slideshow.hide_all_extras'
     bl_label = 'Toggle Hide All Extras From Randomize Operations'
     bl_description = 'Toggle Hide All Extras From Randomize Operations'
@@ -1928,7 +3019,7 @@ class SnuSlideshowHideAllExtras(bpy.types.Operator):
 
 
 class SnuSlideshowHideExtra(bpy.types.Operator):
-    #This operator will toggle an extra in the hidden list
+    """Toggle an extra in the hidden list"""
     bl_idname = 'slideshow.hide_extra'
     bl_label = 'Hide Extra From Randomize Operations'
     bl_description = 'Hide Extra From Randomize Operations'
@@ -1947,7 +3038,7 @@ class SnuSlideshowHideExtra(bpy.types.Operator):
 
 
 class SnuSlideshowChangeExtra(bpy.types.Operator):
-    #This operator will change the listed extra in the currently selected object
+    """Change the extra in the currently selected object"""
     bl_idname = 'slideshow.change_extra'
     bl_label = 'Change Extra'
 
@@ -1960,7 +3051,7 @@ class SnuSlideshowChangeExtra(bpy.types.Operator):
 
 
 class SnuSlideshowTransformsMenu(bpy.types.Menu):
-    #This is a menu of the transforms and allows for them to be disabled
+    """Menu of transforms with enable/disable options"""
     bl_idname = 'SSG_MT_transforms_menu'
     bl_label = 'List of available transforms'
 
@@ -1970,32 +3061,26 @@ class SnuSlideshowTransformsMenu(bpy.types.Menu):
         split = layout.split()
         column = split.column()
 
-        #Iterate through transforms and display the transforms name column
         is_generator = is_generator_scene(scene)
         for index, transform in enumerate(transforms):
             if is_generator:
-                #This is the slideshow generator scene, the transforms can be selected
                 column.operator("slideshow.change_transform", text=transform['name']).transform = transform['name']
             else:
-                #This is not the slideshow generator scene, the transforms can only be toggled
                 column.operator("slideshow.hide_transform", text=transform['name']).transform = transform['name']
 
         column = split.column()
         hidden = scene.snu_slideshow_generator.hidden_transforms.split(';')
 
-        #iterate through transforms and display enable/disable column
         for index, transform in enumerate(transforms):
             if transform['name'] in hidden:
-                #This transform is not enabled
                 column.operator("slideshow.hide_transform", text="", icon="CHECKBOX_DEHLT").transform = transform['name']
             else:
-                #This transform is enabled
                 column.operator("slideshow.hide_transform", text="", icon="CHECKBOX_HLT").transform = transform['name']
         column.operator("slideshow.hide_all_transforms", text="Toggle All")
 
 
 class SnuSlideshowHideAllTransforms(bpy.types.Operator):
-    #This operator will enable all transforms if none are enabled, otherwise it will disable all
+    """Toggle all transforms on and off"""
     bl_idname = 'slideshow.hide_all_transforms'
     bl_label = 'Toggle Hide All Transforms From Randomize Operations'
     bl_description = 'Toggle Hide All Transforms From Randomize Operations'
@@ -2013,7 +3098,7 @@ class SnuSlideshowHideAllTransforms(bpy.types.Operator):
 
 
 class SnuSlideshowHideTransform(bpy.types.Operator):
-    #This operator will toggle a transform in the hidden list
+    """Toggle a transform in the hidden list"""
     bl_idname = 'slideshow.hide_transform'
     bl_label = 'Hide Transform From Randomize Operations'
     bl_description = 'Hide Transform From Randomize Operations'
@@ -2032,7 +3117,7 @@ class SnuSlideshowHideTransform(bpy.types.Operator):
 
 
 class SnuSlideshowChangeTransform(bpy.types.Operator):
-    #This operator will change the listed transform in the currently selected object
+    """Change the transform in the currently selected object"""
     bl_idname = 'slideshow.change_transform'
     bl_label = 'Change Transform'
 
@@ -2045,7 +3130,7 @@ class SnuSlideshowChangeTransform(bpy.types.Operator):
 
 
 class SnuSlideshowApplyExtra(bpy.types.Operator):
-    #This operator will apply an extra, or randomize extras on all slides that do not have locked extras
+    """Apply an extra or randomize extras on all slides"""
     bl_idname = 'slideshow.apply_extra'
     bl_label = 'Apply To All'
     bl_description = 'Applies an extra to all slides'
@@ -2074,7 +3159,6 @@ class SnuSlideshowApplyExtra(bpy.types.Operator):
                             scene_object.slideshow.extratext = current_slide.slideshow.extratext
 
         else:
-            #Get list of extras that are not disabled for randomization purposes
             for extra in extras:
                 if extra not in hidden and extra != "None":
                     randomized.append(extra)
@@ -2087,37 +3171,25 @@ class SnuSlideshowApplyExtra(bpy.types.Operator):
             for extra_texture_preset in current_scene.snu_slideshow_generator.extra_texture_presets:
                 extratextures.append(extra_texture_preset.path)
 
-            #Iterate through all slides
             for slide in slides:
                 if not slide.slideshow.lockextra:
-                    #Only check slides that are not locked
                     if self.extra == 'Random':
-                        #Apply a random extra
                         if len(randomized) > 0:
-                            #Make sure at least one extra is enabled
-
-                            #Randomize extra texture
                             lessrandomized = [x for x in extratextures if x != lastextratexture]
                             if len(lessrandomized) > 0:
                                 newextratexture = lessrandomized[random.randint(0, (len(lessrandomized)-1))]
                                 slide.slideshow.extratexture = newextratexture
 
-                            #Randomize extra
                             if len(randomized) > 1:
-                                #More than one extra is enabled, so dont use the same extra twice in a row
                                 lessrandomized = [x for x in randomized if x != lastextra]
                                 newextra = lessrandomized[random.randint(0, (len(lessrandomized)-1))]
                                 slide.slideshow.extra = newextra
                                 slide.slideshow.extraamount = 0.5
                                 lastextra = newextra
-
                             else:
-                                #Only one extra is enabled, use it
                                 slide.slideshow.extra = randomized[0]
                                 slide.slideshow.extraamount = 0.5
-
                     else:
-                        #Apply the extra from current_slide to the slide
                         slide.slideshow.extra = current_slide.slideshow.extra
                         slide.slideshow.extraamount = current_slide.slideshow.extraamount
                         slide.slideshow.extratexture = current_slide.slideshow.extratexture
@@ -2127,7 +3199,7 @@ class SnuSlideshowApplyExtra(bpy.types.Operator):
 
 
 class SnuSlideshowApplyTransform(bpy.types.Operator):
-    #This operator will apply a transform, or randomize transforms on all slides that do not have locked transforms
+    """Apply a transform or randomize transforms on all slides"""
     bl_idname = 'slideshow.apply_transform'
     bl_label = 'Apply To All'
     bl_description = 'Applies a transform to all slides'
@@ -2152,38 +3224,30 @@ class SnuSlideshowApplyTransform(bpy.types.Operator):
                             scene_object.slideshow.transform = current_slide.slideshow.transform
 
         else:
-            #Iterate through transforms to get a list of non-disabled ones
             for transform in transforms:
                 if transform['name'] not in hidden:
                     randomized.append(transform)
             lasttransform = {"name": ""}
 
-            #Iterate through all slides
             for slide in slides:
                 if not slide.slideshow.locktransform:
-                    #Only modify slides without a locked transform
                     if self.transform == 'Random':
-                        #Apply a randomized transform to all slides
                         if len(randomized) > 0:
-                            #Only can be applied if at least one transform is enabled
                             if len(randomized) > 1:
-                                #More than one transform is enabled, apply a random one while making sure it is not the same as the last applied transform
                                 lessrandomized = [x for x in randomized if x['name'] != lasttransform['name']]
                                 newtransform = lessrandomized[random.randint(0, (len(lessrandomized)-1))]
                                 slide.slideshow.transform = newtransform['name']
                                 lasttransform = newtransform
                             else:
-                                #Only one transform is enabled, just apply it
                                 slide.slideshow.transform = randomized[0]['name']
                     else:
-                        #Apply the named transform to the slide
                         slide.slideshow.transform = current_slide.slideshow.transform
 
         return{'FINISHED'}
 
 
 class SnuSlideshowApplyTransition(bpy.types.Operator):
-    #This operator will apply a transition to all slides that do not have locked transitions
+    """Apply a transition to all slides"""
     bl_idname = 'slideshow.apply_transition'
     bl_label = 'Apply To All'
     bl_description = 'Applies a transition to all slides'
@@ -2191,7 +3255,6 @@ class SnuSlideshowApplyTransition(bpy.types.Operator):
     transition: bpy.props.StringProperty()
 
     def apply_transition(self, selected, target):
-        #copies transition details from selected to target
         target.transition = selected.transition
         target.wipe_type = selected.wipe_type
         target.wipe_direction = selected.wipe_direction
@@ -2215,7 +3278,7 @@ class SnuSlideshowApplyTransition(bpy.types.Operator):
 
 
 class SnuSlideshowApplySlideLength(bpy.types.Operator):
-    #This operator will apply a slide length to all slides that do not have a locked length
+    """Apply a slide length to all slides"""
     bl_idname = 'slideshow.apply_slide_length'
     bl_label = 'Apply To All'
     bl_description = 'Applies current slide length to all slides'
@@ -2232,10 +3295,8 @@ class SnuSlideshowApplySlideLength(bpy.types.Operator):
                     if scene_object.slideshow.name != "None":
                         if not scene_object.slideshow.locklength:
                             scene_object.slideshow.length = current_slide.slideshow.length
-
         else:
             slides = list_slides(current_scene)
-
             for slide in slides:
                 if not slide.slideshow.locklength:
                     slide.slideshow.length = current_slide.slideshow.length
@@ -2243,20 +3304,19 @@ class SnuSlideshowApplySlideLength(bpy.types.Operator):
 
 
 class SnuSlideshowUpdateOrder(bpy.types.Operator):
-    #This operator just runs the 'update_order' function
+    """Update slide order"""
     bl_idname = 'slideshow.update_order'
     bl_label = 'Update Slide Order'
 
     mode: bpy.props.StringProperty()
 
     def execute(self, context):
-        del context
         update_order(self.mode)
         return{'FINISHED'}
 
 
 class SnuSlideshowDeleteSlide(bpy.types.Operator):
-    #This operator will remove all selected slides from the generator scene
+    """Remove all selected slides from the generator scene"""
     bl_idname = 'slideshow.delete_slide'
     bl_label = 'Delete Selected Slide(s)'
     bl_description = 'Deletes selected slides and rearranges the list'
@@ -2264,15 +3324,12 @@ class SnuSlideshowDeleteSlide(bpy.types.Operator):
     def execute(self, context):
         selected_objects = context.selected_objects
 
-        #Iterate through selected objects
         selected_slides = []
         for selected in selected_objects:
             if len(selected_objects) == 1 and selected.slideshow.name == "None" and selected.parent:
-                #Only one object is selected, and the selected object is one of the sub objects of a slide - the user probably wants to delete that slide, so change the selection to that
                 selected = selected.parent
 
             if selected.slideshow.name != "None":
-                #The selected object is a slide, delete it and all its sub-objects
                 selected_slides.append(selected)
         bpy.ops.object.select_all(action='DESELECT')
         for selected in selected_slides:
@@ -2285,7 +3342,7 @@ class SnuSlideshowDeleteSlide(bpy.types.Operator):
 
 
 class SnuSlideshowAddExtraTexture(bpy.types.Operator):
-    #This operator will add a texture preset to the extra textures
+    """Add a texture preset to the extra textures"""
     bl_idname = 'slideshow.add_extra_texture'
     bl_label = '+'
     bl_description = 'Adds a texture preset to the extra textures'
@@ -2306,7 +3363,7 @@ class SnuSlideshowAddExtraTexture(bpy.types.Operator):
 
 
 class SnuSlideshowRemoveExtraTexture(bpy.types.Operator):
-    #This operator will attempt to find and remove a texture preset from the list
+    """Remove a texture preset from the list"""
     bl_idname = 'slideshow.remove_extra_texture'
     bl_label = '-'
     bl_description = 'Removes a texture preset from the extra textures'
@@ -2325,7 +3382,7 @@ class SnuSlideshowRemoveExtraTexture(bpy.types.Operator):
 
 
 class SnuSlideshowExtraTextureMenu(bpy.types.Menu):
-    #This is a menu to list extra texture presets
+    """Menu to list extra texture presets"""
     bl_idname = 'SSG_MT_extra_texture_menu'
     bl_label = 'List of saved extra textures'
 
@@ -2343,7 +3400,7 @@ class SnuSlideshowExtraTextureMenu(bpy.types.Menu):
 
 
 class SnuSlideshowChangeExtraTexture(bpy.types.Operator):
-    #Set the extra texture for the currently active slide
+    """Set the extra texture for the currently active slide"""
     bl_idname = 'slideshow.change_extra_texture'
     bl_label = 'Change Extra Texture'
 
@@ -2360,7 +3417,7 @@ class SnuSlideshowChangeExtraTexture(bpy.types.Operator):
 
 
 class SnuSlideshowCreate(bpy.types.Operator):
-    #This operator creates a slideshow scene and all the image scenes from the generator scene
+    """Create a slideshow scene and all the image scenes from the generator scene"""
     bl_idname = 'slideshow.create'
     bl_label = 'Create Slideshow'
     bl_description = 'Turns the Slideshow Generator scene into a full slideshow'
@@ -2369,18 +3426,18 @@ class SnuSlideshowCreate(bpy.types.Operator):
         generator_scene = context.scene
         generator_scene.snu_slideshow_generator.generator_workspace = context.workspace.name
 
-        #Set up the Slideshow scene
+        # Set up the Slideshow scene
         clear_sequencer(generator_scene)
         image_scene_start = 1
 
-        #Create a copy of the currently active and selected objects so they can be re-set later
+        # Create a copy of the currently active and selected objects
         active = context.active_object
         selected = []
         for scene_object in context.scene.objects:
             if scene_object.select_get():
                 selected.append(scene_object)
 
-        #Iterate through image list, create scene for each image, and import into VSE
+        # Iterate through image list, create scene for each image, and import into VSE
         images = list_slides(generator_scene)
         images.sort(key=lambda x: x.slideshow.index)
         previous_image_clip = None
@@ -2389,43 +3446,50 @@ class SnuSlideshowCreate(bpy.types.Operator):
             previous_image_clip = create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, images, previous_image_clip, previous_image_plane)
             previous_image_plane = image_plane
             image_scene_start = previous_image_clip.frame_final_end - generator_scene.snu_slideshow_generator.crossfade_length
+            
+            # NEW: Add individual text overlay for this slide if enabled
+            if image_plane.slideshow.enable_text_overlay and image_plane.slideshow.has_text_file:
+                text_scene = create_slide_text_overlay_scene_with_improved_outline(generator_scene, image_plane, image_plane.slideshow.length)
+                if text_scene:
+                    # Add text overlay to sequencer for this specific slide
+                    text_clip = generator_scene.sequence_editor.sequences.new_scene(
+                        scene=text_scene, 
+                        name=f"{text_scene.name}_Text", 
+                        channel=5, 
+                        frame_start=previous_image_clip.frame_final_start
+                    )
+                    text_clip.frame_final_end = previous_image_clip.frame_final_end
+                    text_clip.blend_type = 'ALPHA_OVER'
+
         self.report({'INFO'}, "Slideshow created")
 
-        #Set slideshow length
+        # Set slideshow length
         generator_scene.frame_end = image_scene_start + generator_scene.snu_slideshow_generator.crossfade_length
         generator_scene.sync_mode = 'AUDIO_SYNC'
 
-        #Add slideshow audio if enabled
+        # Add slideshow audio if enabled
         if generator_scene.snu_slideshow_generator.audio_enabled:
             filename = os.path.realpath(bpy.path.abspath(generator_scene.snu_slideshow_generator.audio_track))
             if os.path.exists(filename):
                 extension = os.path.splitext(generator_scene.snu_slideshow_generator.audio_track)[1].lower()
                 if extension in bpy.path.extensions_audio:
-                    #audio is enabled, the file exists, and is an audio format blender recognizes
                     audio_frame_end = 0
-
-                    #This loop will repeat adding the audio track until the end of the slideshow is reached
                     i = 0
                     audio_sequence = None
                     while audio_frame_end < generator_scene.frame_end:
                         if audio_frame_end == 0:
-                            #Set the starting point for the first loop
                             frame_start = 1
                         else:
-                            #Set the starting point for a repeating audio loop
                             frame_start = audio_frame_end+1-generator_scene.snu_slideshow_generator.audio_loop_fade
 
                         audio_sequence = generator_scene.sequence_editor.sequences.new_sound(name='Audio', filepath=filename, channel=6+(i % 2), frame_start=frame_start)
 
                         if audio_sequence.frame_duration > 0:
-                            #The audio sequence was added correctly, set the ending point
                             audio_frame_end = audio_sequence.frame_final_end
                         else:
-                            #Something went wrong, abort adding audio sequences
                             audio_frame_end = generator_scene.frame_end
                         i += 1
 
-                    #Add a fadeout to the last audio sequence
                     if audio_sequence:
                         audio_sequence.frame_final_end = generator_scene.frame_end
                         generator_scene.frame_current = generator_scene.frame_end - generator_scene.snu_slideshow_generator.audio_fade_length
@@ -2434,7 +3498,7 @@ class SnuSlideshowCreate(bpy.types.Operator):
                         audio_sequence.volume = 0
                         audio_sequence.keyframe_insert(data_path='volume')
 
-        #Attempt to switch to the video editor screen layout
+        # Attempt to switch to the video editor workspace
         try:
             context.window.workspace = bpy.data.workspaces['Video Editing']
         except KeyError:
@@ -2446,19 +3510,18 @@ class SnuSlideshowCreate(bpy.types.Operator):
         except:
             pass
 
-        #Return the selected and active objects to the way they were before the slideshow generation
+        # Return the selected and active objects to their previous state
         for scene_object in context.scene.objects:
             if scene_object in selected:
                 scene_object.select_set(True)
             else:
                 scene_object.select_set(False)
-        #context.view_layer.objects.active = active
 
         return{'FINISHED'}
 
 
 class SnuSlideshowGenerator(bpy.types.Operator):
-    #This operator will import images, and create the slideshow generator scene and everything in it
+    """Import images and create the slideshow generator scene"""
     bl_idname = 'slideshow.generator'
     bl_label = 'Create Slideshow Generator'
     bl_description = 'Imports images and creates a scene for setting up the slideshow'
@@ -2466,7 +3529,7 @@ class SnuSlideshowGenerator(bpy.types.Operator):
     mode: bpy.props.StringProperty()
 
     def execute(self, context):
-        #check if slideshow generator scene exists, warn and cancel if it does
+        # Check if slideshow generator scene exists
         if self.mode != 'direct':
             generator_name = context.scene.name + ' Slideshow Generator'
             if bpy.data.scenes.find(generator_name) != -1:
@@ -2478,11 +3541,10 @@ class SnuSlideshowGenerator(bpy.types.Operator):
         image_types = get_extensions_image()
         video_types = get_extensions_video()
 
-        #get list of images in image_directory
+        # Get list of images in image_directory
         image_list = []
         video_list = []
         for image_type in image_types:
-            #Search directory for files matching all image types, and add them to the list
             image_list.extend(glob.glob(bpy.path.abspath(image_directory)+'*'+image_type))
         for video_type in video_types:
             video_list.extend(glob.glob(bpy.path.abspath(image_directory)+'*'+video_type))
@@ -2497,7 +3559,7 @@ class SnuSlideshowGenerator(bpy.types.Operator):
 
         self.report({'INFO'}, 'Importing '+str(total_images)+' images')
 
-        #create scene, switch to it, and set up properties
+        # Create scene, switch to it, and set up properties
         if self.mode == 'direct':
             generator_scene = context.scene
             generator_scene.snu_slideshow_generator.base_name = generator_scene.name
@@ -2518,12 +3580,8 @@ class SnuSlideshowGenerator(bpy.types.Operator):
                 new_preset.name = extra_texture_preset.name
                 new_preset.path = extra_texture_preset.path
 
-        #Attempt to switch to the correct viewport view and settings
+        # Set up viewport view and settings
         space = get_first_3d_view()
-        #for area in context.screen.areas:
-        #    if area.type == 'VIEW_3D':
-        #        for space in area.spaces:
-        #            if space.type == 'VIEW_3D':
         if space:
             if space.shading.type not in ['MATERIAL', 'RENDERED']:
                 space.shading.type = 'MATERIAL'
@@ -2534,14 +3592,13 @@ class SnuSlideshowGenerator(bpy.types.Operator):
             space.overlay.show_relationship_lines = False
             space.lock_cursor = True
 
-        #Add header instruction text
-        
+        # Add header instruction text
         instructions = add_object(generator_scene, 'Instructions', 'FONT')
         instructions.location = (-1, 1.25, 0.0)
         instructions.scale = (.15, .15, .15)
-        instructions.data.body = "Select an image and see the Scene tab in the properties area for details.\nDrag an image to rearrange it in the timeline.\nThe center cross on each image represents the focal point for transformations.\nThe box surrounding each image represents the viewable area for the cameara.\nMove, scale, and rotate this to change the viewable area."
+        instructions.data.body = "Select an image and see the Scene tab in the properties area for details.\nDrag an image to rearrange it in the timeline.\nThe center cross on each image represents the focal point for transformations.\nThe box surrounding each image represents the viewable area for the camera.\nMove, scale, and rotate this to change the viewable area."
 
-        #Iterate through the list and import the images
+        # Iterate through the list and import the images
         image_number = 1
         last_image = None
         for import_data in imports:
@@ -2560,100 +3617,65 @@ class SnuSlideshowGenerator(bpy.types.Operator):
         return{'FINISHED'}
 
 
-class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
-    #snu_slideshow_generator.audio_loop_fade
-    is_generator_scene: bpy.props.BoolProperty(
-        default=False)
-    hidden_transforms: bpy.props.StringProperty(
-        name="Hidden Transforms",
-        default="",
-        description="List of transforms to not use in randomize operations")
-    hidden_extras: bpy.props.StringProperty(
-        name="Hidden Extras",
-        default="Text Normal Bottom;Text Normal Top;Video Background;Video Background With Shadows;Video Foreground;Compositor Glare;Overlay Curves Left;Overlay Curves Right",
-        description="List of extras to not use in randomize operations")
-    image_directory: bpy.props.StringProperty(
-        name="Image Directory",
-        default='/Images/',
-        description="Location of images used in slideshow",
-        subtype='DIR_PATH')
-    slide_length: bpy.props.FloatProperty(
-        name="Slide Length (Seconds)",
-        default=4,
-        min=1,
-        max=20,
-        description="Slide Scene Length In Seconds")
-    crossfade_length: bpy.props.IntProperty(
-        name="Crossfade Length (Frames)",
-        default=10,
-        min=0,
-        max=120)
-    extra_texture: bpy.props.StringProperty(
-        name="Extra Texture",
-        default="None")
-    extra_texture_presets: bpy.props.CollectionProperty(
-        type=SnuSlideshowExtraTexturePreset)
-    audio_enabled: bpy.props.BoolProperty(
-        default=False)
-    audio_track: bpy.props.StringProperty(
-        name="Audio Track",
-        default="None")
-    audio_fade_length: bpy.props.IntProperty(
-        name="Fade Out",
-        description="Length of audio fade out in frames",
-        default=30,
-        min=0,
-        max=600)
-    audio_loop_fade: bpy.props.IntProperty(
-        name="Loop Overlap",
-        description="Length of audio overlap when track is looped in frames",
-        default=60,
-        min=0,
-        max=600)
-    base_name: bpy.props.StringProperty(
-        name="Base Name For Created Scenes",
-        default='')
-    generator_name: bpy.props.StringProperty(
-        name="Generator Scene Name",
-        default='')
-    generator_workspace: bpy.props.StringProperty(
-        name="Generator Scene Workspace",
-        default='')
-    aspect_ratio: bpy.props.FloatProperty(
-        default=0)
-    render_samples: bpy.props.IntProperty(
-        min=0,
-        default=24,
-        max=128)
+# REGISTRATION
+classes = [
+    SnuSlideshowExtraTexturePreset, 
+    SnuSlideshowImage, 
+    SnuSlideshowGeneratorSettings,
+    SSG_PT_VSEPanel, 
+    SSG_PT_Panel, 
+    SSG_PT_SlidePanel, 
+    SnuSlideshowGotoGenerator,
+    SnuSlideshowPreviewMode, 
+    SnuSlideshowMoveSlide, 
+    SnuSlideshowOpenExtraTexture,
+    SnuSlideshowOpenAudio, 
+    SnuSlideshowAddSlide, 
+    SnuSlideshowExtraMenu, 
+    SnuSlideshowHideAllExtras,
+    SnuSlideshowHideExtra, 
+    SnuSlideshowChangeExtra, 
+    SnuSlideshowTransformsMenu, 
+    SnuSlideshowHideAllTransforms,
+    SnuSlideshowHideTransform, 
+    SnuSlideshowChangeTransform, 
+    SnuSlideshowApplyExtra, 
+    SnuSlideshowApplyTransform,
+    SnuSlideshowApplySlideLength, 
+    SnuSlideshowApplyTransition, 
+    SnuSlideshowUpdateOrder, 
+    SnuSlideshowDeleteSlide,
+    SnuSlideshowAddExtraTexture, 
+    SnuSlideshowRemoveExtraTexture, 
+    SnuSlideshowExtraTextureMenu,
+    SnuSlideshowChangeExtraTexture, 
+    SnuSlideshowCreate, 
+    SnuSlideshowGenerator
+]
 
-
-classes = [SnuSlideshowExtraTexturePreset, SnuSlideshowImage, SSG_PT_VSEPanel, SnuSlideshowGotoGenerator,
-           SnuSlideshowPreviewMode, SSG_PT_Panel, SSG_PT_SlidePanel, SnuSlideshowMoveSlide, SnuSlideshowOpenExtraTexture,
-           SnuSlideshowOpenAudio, SnuSlideshowAddSlide, SnuSlideshowExtraMenu, SnuSlideshowHideAllExtras,
-           SnuSlideshowHideExtra, SnuSlideshowChangeExtra, SnuSlideshowTransformsMenu, SnuSlideshowHideAllTransforms,
-           SnuSlideshowHideTransform, SnuSlideshowChangeTransform, SnuSlideshowApplyExtra, SnuSlideshowApplyTransform,
-           SnuSlideshowApplySlideLength, SnuSlideshowApplyTransition, SnuSlideshowUpdateOrder, SnuSlideshowDeleteSlide,
-           SnuSlideshowAddExtraTexture, SnuSlideshowRemoveExtraTexture, SnuSlideshowExtraTextureMenu,
-           SnuSlideshowChangeExtraTexture, SnuSlideshowCreate, SnuSlideshowGenerator, SnuSlideshowGeneratorSettings]
+# Cleanup function to remove frame handlers when addon is disabled
+def cleanup_typewriter_handlers():
+    """Remove typewriter frame handlers"""
+    if typewriter_frame_handler in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.remove(typewriter_frame_handler)
 
 
 def register():
-    #Register classes
     for cls in classes:
         bpy.utils.register_class(cls)
 
     bpy.types.Scene.snu_slideshow_generator = bpy.props.PointerProperty(type=SnuSlideshowGeneratorSettings)
-
     bpy.types.Object.slideshow = bpy.props.PointerProperty(type=SnuSlideshowImage)
 
+    # Remove old handlers and add typewriter handler
     handlers = bpy.app.handlers.depsgraph_update_post
     for handler in handlers:
         if " slideshow_autoupdate " in str(handler):
             handlers.remove(handler)
     handlers.append(slideshow_autoupdate)
 
-
 def unregister():
+    cleanup_typewriter_handlers()  # Clean up typewriter handlers
     handlers = bpy.app.handlers.depsgraph_update_post
     for handler in handlers:
         if " slideshow_autoupdate " in str(handler):

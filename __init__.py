@@ -426,8 +426,8 @@ def add_typewriter_animation_frame_based(text_obj, full_text, scene):
         bpy.app.handlers.frame_change_pre.append(typewriter_frame_handler)
 
 
-def add_typewriter_animation_robust(text_obj, full_text, scene):
-    """Add robust typewriter animation using custom properties and drivers"""
+def add_typewriter_animation_robust(text_obj, full_text, scene, start_frame=1):
+    """Add robust typewriter animation using custom properties and drivers with start_frame support"""
     
     if not full_text.strip():  # Handle empty text
         text_obj.data.body = ""
@@ -476,12 +476,13 @@ def add_typewriter_animation_robust(text_obj, full_text, scene):
     # Create keyframes for the progress property
     fcurve = action.fcurves.new(data_path='["typewriter_progress"]')
     
-    # Start keyframe
-    start_point = fcurve.keyframe_points.insert(frame=1, value=0.0)
+    # Start keyframe (adjusted for start_frame)
+    start_point = fcurve.keyframe_points.insert(frame=start_frame, value=0.0)
     start_point.interpolation = 'LINEAR'
     
-    # End keyframe  
-    end_point = fcurve.keyframe_points.insert(frame=total_frames + 1, value=float(len(full_text)))
+    # End keyframe (adjusted for start_frame)
+    end_frame = start_frame + total_frames
+    end_point = fcurve.keyframe_points.insert(frame=end_frame, value=float(len(full_text)))
     end_point.interpolation = 'LINEAR'
     
     # Add a driver to control the text body based on the custom property
@@ -515,6 +516,8 @@ def add_typewriter_animation_robust(text_obj, full_text, scene):
     # Reset to start
     scene.frame_set(1)
     text_obj["typewriter_progress"] = 0.0
+    
+    return total_frames  # Return the duration for synchronization
 
 
 def create_outline_material(name="TextOutlineMaterial"):
@@ -670,13 +673,13 @@ def add_animation_delay_robust(text_obj, delay_frames):
         text_obj["typewriter_start_frame"] += delay_frames
 
 
-def create_typewriter_text_with_improved_outline(scene, text_content, name, location=(0, 0, 0), size=1.0, alignment='LEFT'):
-    """Create text with properly aligned outline/shadow based on alignment setting"""
+def create_typewriter_text_with_improved_outline(scene, text_content, name, location=(0, 0, 0), size=1.0, alignment='LEFT', start_frame=1):
+    """Fixed positioning for proper alignment support with synchronized animation"""
     
     outline_mat_name = f"{name}_OutlineMaterial"
     main_mat_name = f"{name}_MainMaterial"
 
-    # Create outline text (shadow)
+    # Create outline text
     outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
     outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
     scene.collection.objects.link(outline_obj)
@@ -686,7 +689,10 @@ def create_typewriter_text_with_improved_outline(scene, text_content, name, loca
     main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
     scene.collection.objects.link(main_obj)
 
-    # Set IDENTICAL properties for both texts
+    # Set the correct alignment based on the parameter
+    text_align = alignment  # Use the passed alignment parameter
+    
+    # IDENTICAL properties for both texts (except alignment)
     for curve in [outline_curve, main_curve]:
         curve.body = ""
         curve.size = size
@@ -695,38 +701,28 @@ def create_typewriter_text_with_improved_outline(scene, text_content, name, loca
         curve.space_character = 1.15
         curve.space_word = 1.25
         curve.space_line = 1.15
-        curve.align_x = alignment  # Apply the alignment to both
+        curve.align_x = text_align  # Use the actual alignment setting
         curve.align_y = 'CENTER'
         curve.resolution_u = 4
         curve.render_resolution_u = 4
         curve.use_fill_caps = True
 
-    # Calculate shadow offset based on alignment
-    # The key is to adjust the offset direction based on text alignment
-    shadow_offset_base = size * 0.02  # Reduced from 0.03 for subtler effect
-    
-    if alignment == 'LEFT':
-        # For left-aligned text, shadow goes right and down
-        shadow_offset_x = shadow_offset_base
-        shadow_offset_y = -shadow_offset_base
-    elif alignment == 'RIGHT':
-        # For right-aligned text, shadow goes left and down
-        shadow_offset_x = -shadow_offset_base
-        shadow_offset_y = -shadow_offset_base
-    else:  # CENTER
-        # For centered text, shadow goes straight down (no X offset)
-        shadow_offset_x = 0
-        shadow_offset_y = -shadow_offset_base * 1.5  # Slightly more Y offset for centered
-
-    # Position both objects at the same base location
-    # The alignment handles the text positioning internally
-    outline_obj.location = (
-        location[0] + shadow_offset_x,
-        location[1] + shadow_offset_y,
-        location[2] - 0.001  # Z-offset for layering
-    )
-    
+    # REFACTORED POSITIONING LOGIC
+    # Position the main text object at the calculated location.
     main_obj.location = location
+
+    # Parent the outline to the main text object. After this, setting the
+    # outline's location will adjust its position *relative* to the main text.
+    outline_obj.parent = main_obj
+
+    # Apply a small, consistent local offset for the drop-shadow effect.
+    # A small positive X value moves the shadow slightly to the right.
+    # A small negative Y value moves the shadow slightly down.
+    shadow_offset_x = size * 0.02
+    shadow_offset_y = -size * 0.02
+    
+    # This now sets the LOCAL coordinates of the outline relative to the parent.
+    outline_obj.location = (shadow_offset_x, shadow_offset_y, -0.001)
 
     # Create and assign materials
     outline_material = create_outline_material(outline_mat_name)
@@ -737,36 +733,29 @@ def create_typewriter_text_with_improved_outline(scene, text_content, name, loca
     outline_obj.data.materials.append(outline_material)
     main_obj.data.materials.append(main_material)
 
-    # Ensure high contrast
+    # Force high contrast
     try:
         outline_emission = outline_material.node_tree.nodes.get("OutlineEmission")
         main_emission = main_material.node_tree.nodes.get("TextEmission")
         if outline_emission and main_emission:
             outline_emission.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)  # Pure black
-            outline_emission.inputs[1].default_value = 2.0  # Moderate emission
+            outline_emission.inputs[1].default_value = 3.0
             main_emission.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)    # Pure white  
-            main_emission.inputs[1].default_value = 3.0  # Higher emission for main text
+            main_emission.inputs[1].default_value = 4.0
     except Exception as e:
         print(f"Material setup error: {e}")
 
-    # Update scene to apply changes
-    scene.view_layers[0].update()
-    
-    # Parent outline to main for easier management
-    outline_obj.parent = main_obj
-    
-    # Keep the parenting offset minimal
-    outline_obj.location = (shadow_offset_x, shadow_offset_y, -0.001)
+    scene.view_layers.update()
 
-    # Add typewriter animations to both
-    add_typewriter_animation_robust(main_obj, text_content, scene)
-    add_typewriter_animation_robust(outline_obj, text_content, scene)
+    # Add synchronized animations with the same start_frame
+    animation_duration = add_typewriter_animation_robust(main_obj, text_content, scene, start_frame)
+    add_typewriter_animation_robust(outline_obj, text_content, scene, start_frame)
 
-    return main_obj
+    return main_obj, animation_duration  # Return both object and duration
 
 
 def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide, slide_duration):
-    """Create a scene with improved outlined text overlays - updated to pass alignment"""
+    """Create a scene with improved outlined text overlays - with perfect synchronization"""
     
     # Check if slide has text data and is enabled
     if not slide.slideshow.enable_text_overlay:
@@ -829,34 +818,29 @@ def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide
     # Create text objects with improved outline
     y_offset = 0.6
     text_size = 0.18
-    delay_frames = 0
+    current_start_frame = 1  # Track the current animation start frame
     fps = get_fps(text_scene)
+    delay_between_texts = int(fps * 1.2)  # Delay between text elements
     
     for field_name, label in text_fields:
         field_value = getattr(slide.slideshow, field_name, '')
         if field_value:
             text_content = f"{label}: {field_value}"
             
-            # Pass the alignment parameter to the function
-            text_obj = create_typewriter_text_with_improved_outline(
+            # Pass the start_frame to ensure synchronization
+            text_obj, animation_duration = create_typewriter_text_with_improved_outline(
                 text_scene, 
                 text_content,
                 f"{field_name.title()}_Text",
                 location=get_text_location(generator_scene, y_offset, text_size),
                 size=text_size,
-                alignment=text_alignment  # Pass the alignment setting
+                alignment=text_alignment,
+                start_frame=current_start_frame  # Pass the current start frame
             )
             
-            # Add delay to animation
-            if delay_frames > 0:
-                add_animation_delay_robust(text_obj, delay_frames)
-                # Also add delay to outline
-                if f"{text_obj.name}_Outline" in text_scene.objects:
-                    outline_obj = text_scene.objects[f"{text_obj.name}_Outline"]
-                    add_animation_delay_robust(outline_obj, delay_frames)
-            
+            # Update start frame for next text element
+            current_start_frame += delay_between_texts
             y_offset -= 0.35
-            delay_frames += int(fps * 1.2)
     
     # Set up camera with proper settings for text rendering
     camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')

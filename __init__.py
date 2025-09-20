@@ -25,10 +25,10 @@ import glob
 import os
 import sys
 import math
+from mathutils import Vector
 import json
 from bpy_extras.image_utils import load_image
 from bpy.app.handlers import persistent
-
 
 bl_info = {
     "name": "Snu Slideshow Generator",
@@ -264,9 +264,9 @@ def get_text_location(generator_scene, y_offset, size=0.18):
     # Adjust X position based on alignment
     # These positions work with Blender's internal text alignment
     if align == 'LEFT':
-        x = -1.6  # Slightly adjusted from -1.8
+        x = -1.6
     elif align == 'RIGHT':
-        x = 1.6   # Slightly adjusted from 1.8
+        x = 1.6
     else:  # CENTER
         x = 0.0
     
@@ -312,73 +312,7 @@ def load_slide_text_data(image_filepath):
     return {'photographer': '', 'when': '', 'who': '', 'where': '', 'has_text': False}
 
 
-def create_text_material(name="TextMaterial"):
-    """Create a material for text objects to ensure they render properly"""
-    if name in bpy.data.materials:
-        return bpy.data.materials[name]
-    
-    material = bpy.data.materials.new(name=name)
-    material.use_nodes = True
-    
-    # Clear default nodes
-    material.node_tree.nodes.clear()
-    
-    # Create emission shader for bright text
-    emission_node = material.node_tree.nodes.new('ShaderNodeEmission')
-    emission_node.name = "TextEmission"  # Give it a specific name for debugging
-    emission_node.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)  # White color
-    emission_node.inputs[1].default_value = 2.0  # Increased emission strength
-    emission_node.location = (0, 0)
-    
-    # Create output node
-    output_node = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
-    output_node.location = (200, 0)
-    
-    # Link nodes
-    material.node_tree.links.new(emission_node.outputs[0], output_node.inputs[0])
-    
-    return material
 
-
-def add_typewriter_keyframes(text_obj, full_text, scene):
-    """Add typewriter animation effect using keyframes on the body property"""
-    
-    # Clear existing animation data
-    if text_obj.data.animation_data:
-        text_obj.data.animation_data_clear()
-    
-    # Create animation data and action
-    text_obj.data.animation_data_create()
-    action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
-    text_obj.data.animation_data.action = action
-    
-    # Calculate timing
-    fps = get_fps(scene)
-    chars_per_second = 8  # Typing speed
-    frames_per_char = max(1, int(fps / chars_per_second))
-    
-    # Set initial frame and create keyframes for each character
-    scene.frame_set(1)
-    text_obj.data.body = ""
-    text_obj.data.keyframe_insert(data_path="body", frame=1)
-    
-    # Create keyframe for each character addition
-    for i, char in enumerate(full_text):
-        frame = 1 + (i + 1) * frames_per_char
-        partial_text = full_text[:i + 1]
-        scene.frame_set(frame)
-        text_obj.data.body = partial_text
-        text_obj.data.keyframe_insert(data_path="body", frame=frame)
-    
-    # Set interpolation to constant (no smoothing between text states)
-    if text_obj.data.animation_data and text_obj.data.animation_data.action:
-        for fcurve in text_obj.data.animation_data.action.fcurves:
-            if fcurve.data_path == "body":
-                for keyframe in fcurve.keyframe_points:
-                    keyframe.interpolation = 'CONSTANT'
-    
-    # Reset to start
-    scene.frame_set(1)
 
 
 @bpy.app.handlers.persistent
@@ -389,29 +323,25 @@ def typewriter_frame_handler(scene):
         if (obj.type == 'FONT' and 
             "typewriter_full_text" in obj and 
             "typewriter_start_frame" in obj and
-            not obj.data.animation_data):  # Only for frame-based animation
+            not obj.data.animation_data):
             
             current_frame = scene.frame_current
             start_frame = obj["typewriter_start_frame"]
             frames_per_char = obj.get("typewriter_frames_per_char", 8)
             full_text = obj["typewriter_full_text"]
             
-            # Calculate how many characters to show
             elapsed_frames = current_frame - start_frame
             char_count = max(0, min(len(full_text), elapsed_frames // frames_per_char))
             
-            # Update the text body
             obj.data.body = full_text[:int(char_count)]
 
 
 def add_typewriter_animation_frame_based(text_obj, full_text, scene):
     """Fallback frame-based typewriter animation using frame handlers"""
     
-    # Clear existing animation data
     if text_obj.animation_data:
         text_obj.animation_data_clear()
     
-    # Store animation data in the object
     text_obj["typewriter_full_text"] = full_text
     text_obj["typewriter_start_frame"] = scene.frame_current
     
@@ -421,7 +351,6 @@ def add_typewriter_animation_frame_based(text_obj, full_text, scene):
     text_obj["typewriter_frames_per_char"] = frames_per_char
     text_obj["typewriter_total_frames"] = len(full_text) * frames_per_char
     
-    # Register frame handler for this specific object
     if typewriter_frame_handler not in bpy.app.handlers.frame_change_pre:
         bpy.app.handlers.frame_change_pre.append(typewriter_frame_handler)
 
@@ -429,27 +358,22 @@ def add_typewriter_animation_frame_based(text_obj, full_text, scene):
 def add_typewriter_animation_robust(text_obj, full_text, scene, start_frame=1):
     """Add robust typewriter animation using custom properties and drivers with start_frame support"""
     
-    if not full_text.strip():  # Handle empty text
+    if not full_text.strip():
         text_obj.data.body = ""
         return
     
-    # Clear existing animation data
     if text_obj.animation_data:
         text_obj.animation_data_clear()
     
-    # Remove existing drivers on the body property
     if text_obj.data.animation_data:
         text_obj.data.animation_data.drivers.clear()
     
-    # Store the full text in a custom property (safely encoded)
     sanitized_text = sanitize_text_for_driver(full_text)
-    text_obj["typewriter_full_text"] = full_text  # Store original text
-    text_obj["typewriter_sanitized_text"] = sanitized_text  # Store sanitized version
+    text_obj["typewriter_full_text"] = full_text
+    text_obj["typewriter_sanitized_text"] = sanitized_text
     
-    # Add a custom property to control the typewriter effect
     text_obj["typewriter_progress"] = 0.0
     
-    # Set up the custom property with proper range
     try:
         text_obj.id_properties_ui("typewriter_progress").update(
             min=0.0,
@@ -459,209 +383,62 @@ def add_typewriter_animation_robust(text_obj, full_text, scene, start_frame=1):
             description="Controls typewriter effect progress"
         )
     except AttributeError:
-        # Fallback for older Blender versions
         pass
     
-    # Create animation data and action for the custom property
     text_obj.animation_data_create()
     action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
     text_obj.animation_data.action = action
     
-    # Calculate timing
     fps = get_fps(scene)
-    chars_per_second = 8  # Typing speed
+    chars_per_second = 8
     frames_per_char = max(1, int(fps / chars_per_second))
     total_frames = len(full_text) * frames_per_char
     
-    # Create keyframes for the progress property
     fcurve = action.fcurves.new(data_path='["typewriter_progress"]')
     
-    # Start keyframe (adjusted for start_frame)
     start_point = fcurve.keyframe_points.insert(frame=start_frame, value=0.0)
     start_point.interpolation = 'LINEAR'
     
-    # End keyframe (adjusted for start_frame)
     end_frame = start_frame + total_frames
     end_point = fcurve.keyframe_points.insert(frame=end_frame, value=float(len(full_text)))
     end_point.interpolation = 'LINEAR'
     
-    # Add a driver to control the text body based on the custom property
     try:
         driver = text_obj.data.driver_add("body")
         driver.driver.type = 'SCRIPTED'
         
-        # Add variable for the custom property
         var = driver.driver.variables.new()
         var.name = "progress"
         var.type = 'SINGLE_PROP'
         var.targets[0].id = text_obj
         var.targets[0].data_path = '["typewriter_progress"]'
         
-        # Add variable for the full text
         var_text = driver.driver.variables.new()
         var_text.name = "full_text"
         var_text.type = 'SINGLE_PROP'
         var_text.targets[0].id = text_obj
         var_text.targets[0].data_path = '["typewriter_full_text"]'
         
-        # Set the driver expression - use a safer approach
         driver.driver.expression = f"full_text[0:int(max(0, min(progress, len(full_text))))] if full_text else ''"
         
     except Exception as e:
         print(f"Error creating driver for {text_obj.name}: {e}")
-        # Fallback to frame-based approach
         add_typewriter_animation_frame_based(text_obj, full_text, scene)
         return
     
-    # Reset to start
     scene.frame_set(1)
     text_obj["typewriter_progress"] = 0.0
     
-    return total_frames  # Return the duration for synchronization
+    return total_frames
 
 
-def create_outline_material(name="TextOutlineMaterial"):
-    """Create a material for text outline to improve contrast and readability"""
-    if name in bpy.data.materials:
-        return bpy.data.materials[name]
-    
-    material = bpy.data.materials.new(name=name)
-    material.use_nodes = True
-    
-    # Clear default nodes
-    material.node_tree.nodes.clear()
-    
-    # Create emission shader for dark outline
-    emission_node = material.node_tree.nodes.new('ShaderNodeEmission')
-    emission_node.name = "OutlineEmission"  # Give it a specific name for debugging
-    emission_node.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)  # Black color for outline
-    emission_node.inputs[1].default_value = 1.5  # Lower emission strength for outline
-    emission_node.location = (0, 0)
-    
-    # Create output node
-    output_node = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
-    output_node.location = (200, 0)
-    
-    # Link nodes
-    material.node_tree.links.new(emission_node.outputs[0], output_node.inputs[0])
-    
-    return material
 
-
-def create_typewriter_text_robust(scene, text_content, name, location=(0, 0, 0), size=1.0):
-    """Create a 3D text object with robust typewriter animation effect"""
-    
-    # Create text object
-    font_curve = bpy.data.curves.new(name=name, type='FONT')
-    text_obj = bpy.data.objects.new(name=name, object_data=font_curve)
-    scene.collection.objects.link(text_obj)
-    
-    # Set text properties
-    font_curve.body = ""  # Start with empty text
-    font_curve.size = size
-    
-    # FIXED: Remove 3D extrusion to eliminate shadow/doubling effects
-    font_curve.extrude = 0.00  # Keep it flat to avoid shadow artifacts
-    outline_material = create_outline_material("CustomOutline")
-    font_curve.materials.append(outline_material)  # Create separate outline material
-    font_curve.bevel_depth = 0.01  # Small bevel for outline effect only
-    #font_curve.bevel_depth = 0.0  # No beveling to prevent visual artifacts
-    font_curve.bevel_resolution = 0
-    
-    # FIXED: Add proper character and word spacing for better readability
-    font_curve.space_character = 1.1  # Increase character spacing by 10%
-    font_curve.space_word = 1.2       # Increase word spacing by 20%
-    font_curve.space_line = 1.1       # Increase line spacing by 10%
-    
-    # Set text alignment and positioning
-    font_curve.align_x = 'CENTER'
-    font_curve.align_y = 'CENTER'
-    
-    # FIXED: Improve text quality settings
-    font_curve.resolution_u = 4  # Higher resolution for smoother curves
-    font_curve.render_resolution_u = 4  # Higher render resolution
-    
-    # Create and assign material for proper rendering
-    text_material = create_text_material(f"{name}_Material")
-    text_obj.data.materials.append(text_material)
-    
-    # Position the text
-    text_obj.location = location
-    
-    # Add robust typewriter animation
-    add_typewriter_animation_robust(text_obj, text_content, scene)
-    
-    return text_obj
-
-
-def add_typewriter_effect(text_obj, full_text, scene):
-    """Add typewriter animation effect to text object using drivers and custom properties"""
-    
-    # Clear existing animation data
-    if text_obj.animation_data:
-        text_obj.animation_data_clear()
-    
-    # Add a custom property to control the typewriter effect
-    text_obj["typewriter_progress"] = 0.0
-    
-    # Set up the custom property with proper range
-    text_obj.id_properties_ui("typewriter_progress").update(
-        min=0.0,
-        max=float(len(full_text)),
-        soft_min=0.0,
-        soft_max=float(len(full_text)),
-        description="Controls typewriter effect progress"
-    )
-    
-    # Create animation data and action for the custom property
-    text_obj.animation_data_create()
-    action = bpy.data.actions.new(name=f"{text_obj.name}_typewriter")
-    text_obj.animation_data.action = action
-    
-    # Animate the custom property
-    fps = get_fps(scene)
-    chars_per_second = 8  # Typing speed (slightly slower for better readability)
-    frames_per_char = max(1, int(fps / chars_per_second))
-    total_frames = len(full_text) * frames_per_char
-    
-    # Create keyframes for the progress property
-    fcurve = action.fcurves.new(data_path='["typewriter_progress"]')
-    
-    # Start keyframe
-    start_point = fcurve.keyframe_points.insert(frame=1, value=0.0)
-    start_point.interpolation = 'LINEAR'
-    
-    # End keyframe
-    end_point = fcurve.keyframe_points.insert(frame=total_frames + 1, value=float(len(full_text)))
-    end_point.interpolation = 'LINEAR'
-    
-    # Add a driver to control the text body based on the custom property
-    driver = text_obj.data.driver_add("body")
-    driver.driver.type = 'SCRIPTED'
-    
-    # Add variable for the custom property
-    var = driver.driver.variables.new()
-    var.name = "progress"
-    var.type = 'SINGLE_PROP'
-    var.targets[0].id = text_obj
-    var.targets[0].data_path = '["typewriter_progress"]'
-    
-    # Store the full text in a custom property for the driver to access
-    text_obj["full_text"] = full_text
-    
-    # Set the driver expression to slice the text based on progress
-    driver.driver.expression = f'"{full_text}"[0:int(max(0, min(progress, {len(full_text)})))]'
-    
-    # Reset to start
-    scene.frame_set(1)
-    text_obj["typewriter_progress"] = 0.0
 
 
 def add_animation_delay_robust(text_obj, delay_frames):
     """Add a delay to the typewriter animation by shifting keyframes or adjusting start frame"""
     
     if text_obj.data.animation_data and text_obj.data.animation_data.action:
-        # Keyframe-based animation - shift keyframes
         for fcurve in text_obj.data.animation_data.action.fcurves:
             if fcurve.data_path == '["typewriter_progress"]':
                 for keyframe in fcurve.keyframe_points:
@@ -669,95 +446,40 @@ def add_animation_delay_robust(text_obj, delay_frames):
                     keyframe.handle_left[0] += delay_frames
                     keyframe.handle_right[0] += delay_frames
     elif "typewriter_start_frame" in text_obj:
-        # Frame-based animation - adjust start frame
         text_obj["typewriter_start_frame"] += delay_frames
 
 
-def create_typewriter_text_with_improved_outline(scene, text_content, name, location=(0, 0, 0), size=1.0, alignment='LEFT', start_frame=1):
-    """Fixed positioning for proper alignment support with synchronized animation"""
-    
-    outline_mat_name = f"{name}_OutlineMaterial"
-    main_mat_name = f"{name}_MainMaterial"
 
-    # Create outline text
-    outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
-    outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
-    scene.collection.objects.link(outline_obj)
 
-    # Create main text  
-    main_curve = bpy.data.curves.new(name=name, type='FONT')
-    main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
-    scene.collection.objects.link(main_obj)
+def add_fade_animation(obj, material, scene, start_frame, duration=20):
+    """Animate emission strength fade-out for text and outline."""
+    if not material or not material.node_tree:
+        return
 
-    # Set the correct alignment based on the parameter
-    text_align = alignment  # Use the passed alignment parameter
-    
-    # IDENTICAL properties for both texts (except alignment)
-    for curve in [outline_curve, main_curve]:
-        curve.body = ""
-        curve.size = size
-        curve.extrude = 0.0
-        curve.bevel_depth = 0.0
-        curve.space_character = 1.15
-        curve.space_word = 1.25
-        curve.space_line = 1.15
-        curve.align_x = text_align  # Use the actual alignment setting
-        curve.align_y = 'CENTER'
-        curve.resolution_u = 4
-        curve.render_resolution_u = 4
-        curve.use_fill_caps = True
+    # Ensure duration is valid
+    if duration is None or duration <= 0:
+        duration = 20
 
-    # REFACTORED POSITIONING LOGIC
-    # Position the main text object at the calculated location.
-    main_obj.location = location
+    nodes = material.node_tree.nodes
+    emission = nodes.get("TextEmission") or nodes.get("OutlineEmission")
+    if not emission:
+        return
 
-    # Parent the outline to the main text object. After this, setting the
-    # outline's location will adjust its position *relative* to the main text.
-    outline_obj.parent = main_obj
+    strength_input = emission.inputs[1]  # Emission Strength
+    fade_start = start_frame + duration
+    fade_end = fade_start + duration
 
-    # Apply a small, consistent local offset for the drop-shadow effect.
-    # A small positive X value moves the shadow slightly to the right.
-    # A small negative Y value moves the shadow slightly down.
-    shadow_offset_x = size * 0.02
-    shadow_offset_y = -size * 0.02
-    
-    # This now sets the LOCAL coordinates of the outline relative to the parent.
-    outline_obj.location = (shadow_offset_x, shadow_offset_y, -0.001)
+    # Insert keyframes for fade-out
+    strength_input.default_value = 4.0
+    strength_input.keyframe_insert("default_value", frame=fade_start)
+    strength_input.default_value = 0.0
+    strength_input.keyframe_insert("default_value", frame=fade_end)
 
-    # Create and assign materials
-    outline_material = create_outline_material(outline_mat_name)
-    main_material = create_text_material(main_mat_name)
-
-    outline_obj.data.materials.clear()
-    main_obj.data.materials.clear()
-    outline_obj.data.materials.append(outline_material)
-    main_obj.data.materials.append(main_material)
-
-    # Force high contrast
-    try:
-        outline_emission = outline_material.node_tree.nodes.get("OutlineEmission")
-        main_emission = main_material.node_tree.nodes.get("TextEmission")
-        if outline_emission and main_emission:
-            outline_emission.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)  # Pure black
-            outline_emission.inputs[1].default_value = 3.0
-            main_emission.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)    # Pure white  
-            main_emission.inputs[1].default_value = 4.0
-    except Exception as e:
-        print(f"Material setup error: {e}")
-
-    scene.view_layers.update()
-
-    # Add synchronized animations with the same start_frame
-    animation_duration = add_typewriter_animation_robust(main_obj, text_content, scene, start_frame)
-    add_typewriter_animation_robust(outline_obj, text_content, scene, start_frame)
-
-    return main_obj, animation_duration  # Return both object and duration
 
 
 def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide, slide_duration):
-    """Create a scene with improved outlined text overlays - with perfect synchronization"""
+    """Create a scene with improved outlined text overlays, including a synchronized fade-out animation"""
     
-    # Check if slide has text data and is enabled
     if not slide.slideshow.enable_text_overlay:
         return None
         
@@ -768,81 +490,93 @@ def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide
         ('text_where', 'Where')
     ]
     
-    # Check if any text fields have content
     has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
     if not has_content:
         return None
     
     text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
     
-    # Remove existing text scene if it exists
     if bpy.data.scenes.find(text_scene_name) != -1:
         bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
     
-    # Create new text scene
     text_scene = create_scene(generator_scene, text_scene_name)
-    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
+    fps = get_fps(text_scene)
+    text_scene.frame_end = int(fps * slide_duration)
     
-    # Set up transparent background
     text_scene.render.film_transparent = True
-    
-    # Enhanced rendering settings for Blender 4.x EEVEE Next
     text_scene.eevee.use_taa_reprojection = True
     text_scene.eevee.taa_samples = 16
     
-    # Disable bloom if available
     try:
         if hasattr(text_scene.eevee, 'use_bloom'):
             text_scene.eevee.use_bloom = False
-        elif hasattr(text_scene.eevee, 'bloom_threshold'):
-            text_scene.eevee.bloom_threshold = 10.0
     except AttributeError:
         pass
     
-    # Create world with transparent background
     world = bpy.data.worlds.new(text_scene.name)
     text_scene.world = world
     world.use_nodes = True
     world.node_tree.nodes.clear()
     
-    # Add transparent background
     output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
     transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
     transparent_node.inputs[0].default_value = (0, 0, 0, 0)
     transparent_node.inputs[1].default_value = 0
     world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
     
-    # Get the alignment setting
     text_alignment = generator_scene.snu_slideshow_generator.text_alignment
     
-    # Create text objects with improved outline
-    y_offset = 0.6
-    text_size = 0.18
-    current_start_frame = 1  # Track the current animation start frame
-    fps = get_fps(text_scene)
-    delay_between_texts = int(fps * 1.2)  # Delay between text elements
+    y_offset = generator_scene.snu_slideshow_generator.text_y_offset
+    text_size = generator_scene.snu_slideshow_generator.text_size
+    current_start_frame = 1
+    delay_between_texts = int(fps * 1.2)
     
+    materials_to_fade = []
+    fade_start_frame = None
+    fade_end_frame = None
+
     for field_name, label in text_fields:
         field_value = getattr(slide.slideshow, field_name, '')
-        if field_value:
-            text_content = f"{label}: {field_value}"
-            
-            # Pass the start_frame to ensure synchronization
-            text_obj, animation_duration = create_typewriter_text_with_improved_outline(
-                text_scene, 
-                text_content,
-                f"{field_name.title()}_Text",
-                location=get_text_location(generator_scene, y_offset, text_size),
-                size=text_size,
-                alignment=text_alignment,
-                start_frame=current_start_frame  # Pass the current start frame
-            )
-            
-            # Update start frame for next text element
-            current_start_frame += delay_between_texts
-            y_offset -= 0.35
+        if not field_value:
+            continue
+
+        text_content = f"{label}: {field_value}"
+        main_text_obj, outline_text_obj, main_material, outline_material, animation_duration = create_typewriter_text_with_improved_outline(
+            text_scene,
+            text_content,
+            f"{field_name.title()}_Text",
+            location=get_text_location(generator_scene, y_offset, text_size),
+            size=text_size,
+            alignment=text_alignment,
+            start_frame=current_start_frame,
+        )
+
+        # ensure animation_duration is valid
+        if not animation_duration:
+            # fallback: estimate based on length of text or minimum 20 frames
+            animation_duration = max(len(text_content) * 2, 20)
+
+        # collect materials
+        if main_material:
+            materials_to_fade.append((main_text_obj, main_material))
+        if outline_material:
+            materials_to_fade.append((outline_text_obj, outline_material))
+
+        # compute fade timing relative to last text created
+        if fade_start_frame is None:
+            fade_start_frame = current_start_frame
+        fade_end_frame = current_start_frame + animation_duration
+
+        # update frame & layout offset
+        current_start_frame += delay_between_texts
+        y_offset -= 0.35
+
+    # apply fade once for all collected text materials
+    if materials_to_fade and fade_start_frame is not None and fade_end_frame is not None:
+        fade_start = int(fps * slide_duration) - 20  # start fade near end
+        for obj, material in materials_to_fade:
+            add_fade_animation(obj, material, text_scene, start_frame=fade_start, duration=20)
     
-    # Set up camera with proper settings for text rendering
     camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
     camera.location = (0, 0, 5)
     camera.data.clip_start = 0.1
@@ -851,308 +585,6 @@ def create_slide_text_overlay_scene_with_improved_outline(generator_scene, slide
     
     return text_scene
 
-
-def create_typewriter_text_with_outline(scene, text_content, name, location=(0, 0, 0), size=1.0):
-    """Create a 3D text object with outline effect for better contrast"""
-    
-    # Create text object
-    font_curve = bpy.data.curves.new(name=name, type='FONT')
-    text_obj = bpy.data.objects.new(name=name, object_data=font_curve)
-    scene.collection.objects.link(text_obj)
-    
-    # Set text properties
-    font_curve.body = ""  # Start with empty text
-    font_curve.size = size
-    
-    # Create subtle bevel for outline effect only
-    font_curve.extrude = 0.0  # Keep face flat
-    font_curve.bevel_depth = 0.015  # Very small bevel for outline
-    font_curve.bevel_resolution = 2
-    font_curve.use_fill_caps = True  # Ensure proper face rendering
-    
-    # Character spacing improvements
-    font_curve.space_character = 1.15  # 15% increase in character spacing
-    font_curve.space_word = 1.25       # 25% increase in word spacing
-    font_curve.space_line = 1.15       # 15% increase in line spacing
-    
-    # Set text alignment and positioning
-    font_curve.align_x = 'CENTER'
-    font_curve.align_y = 'CENTER'
-    
-    # Higher resolution for smoother curves
-    font_curve.resolution_u = 4
-    font_curve.render_resolution_u = 4
-    
-    # Create and assign materials
-    # Material slot 0: Main text (white)
-    text_material = create_text_material(f"{name}_Material")
-    text_obj.data.materials.append(text_material)
-    
-    # Material slot 1: Outline/bevel (black)
-    outline_material = create_outline_material(f"{name}_OutlineMaterial")
-    text_obj.data.materials.append(outline_material)
-    
-    # Assign materials to different parts of the geometry
-    # The bevel faces will use the outline material automatically
-    font_curve.bevel_factor_mapping_start = 0.0
-    font_curve.bevel_factor_mapping_end = 1.0
-    
-    # Position the text
-    text_obj.location = location
-    
-    # Add robust typewriter animation
-    add_typewriter_animation_robust(text_obj, text_content, scene)
-    
-    return text_obj
-
-
-def create_typewriter_text_with_simple_outline(scene, text_content, name, location=(0, 0, 0), size=1.0):
-    """Alternative approach: Create two text objects for outline effect"""
-    
-    # Create unique material names to avoid conflicts
-    outline_mat_name = f"{name}_Outline_Mat_{random.randint(1000,9999)}"
-    main_mat_name = f"{name}_Main_Mat_{random.randint(1000,9999)}"
-    
-    # Create outline text (slightly larger, black)
-    outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
-    outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
-    scene.collection.objects.link(outline_obj)
-    
-    # Outline properties
-    outline_curve.body = ""
-    outline_curve.size = size * 1.08  # 8% larger for better outline visibility
-    outline_curve.extrude = 0.0
-    outline_curve.bevel_depth = 0.0
-    outline_curve.space_character = 1.15
-    outline_curve.space_word = 1.25
-    outline_curve.space_line = 1.15
-    outline_curve.align_x = 'CENTER'
-    outline_curve.align_y = 'CENTER'
-    outline_curve.resolution_u = 4
-    outline_curve.render_resolution_u = 4
-    
-    # Create main text (normal size, white)
-    main_curve = bpy.data.curves.new(name=name, type='FONT')
-    main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
-    scene.collection.objects.link(main_obj)
-    
-    # Main text properties
-    main_curve.body = ""
-    main_curve.size = size
-    main_curve.extrude = 0.0
-    main_curve.bevel_depth = 0.0
-    main_curve.space_character = 1.15
-    main_curve.space_word = 1.25
-    main_curve.space_line = 1.15
-    main_curve.align_x = 'CENTER'
-    main_curve.align_y = 'CENTER'
-    main_curve.resolution_u = 4
-    main_curve.render_resolution_u = 4
-    
-    # Position objects with proper Z separation
-    # outline_obj.location = (location[0], location[1], location[2] - 0.001)  # Behind (lower Z)
-    # main_obj.location = (location[0], location[1], location[2])              # In front (higher Z)
-    # Position both at the same center point with just Z-offset
-    outline_obj.location = (location[0], location[1], location[2] - 0.001)
-    main_obj.location = location
-
-    # Create materials with explicit debugging
-    print(f"Creating materials for {name}...")
-    outline_material = create_outline_material(outline_mat_name)
-    main_material = create_text_material(main_mat_name)
-    
-    # Assign materials explicitly
-    outline_obj.data.materials.clear()  # Clear any existing materials
-    main_obj.data.materials.clear()     # Clear any existing materials
-    
-    outline_obj.data.materials.append(outline_material)  # BLACK outline behind
-    main_obj.data.materials.append(main_material)        # WHITE text in front
-    
-    # Debug: Print what we assigned
-    print(f"Outline object '{outline_obj.name}' assigned material: {outline_material.name}")
-    print(f"Main object '{main_obj.name}' assigned material: {main_material.name}")
-    print(f"Outline material color: {outline_material.node_tree.nodes['Emission'].inputs[0].default_value}")
-    print(f"Main material color: {main_material.node_tree.nodes['Emission'].inputs[0].default_value}")
-    
-    # Parent outline to main text for easier management
-    outline_obj.parent = main_obj
-    
-    # Add typewriter animation to both objects with same content
-    add_typewriter_animation_robust(main_obj, text_content, scene)
-    add_typewriter_animation_robust(outline_obj, text_content, scene)
-    
-    return main_obj  # Return main object as primary reference
-
-
-# Updated scene creation function using outline method
-def create_slide_text_overlay_scene_with_outline(generator_scene, slide, slide_duration):
-    """Create a scene with outlined text overlays for better contrast"""
-    
-    # Check if slide has text data and is enabled
-    if not slide.slideshow.enable_text_overlay:
-        return None
-        
-    text_fields = [
-        ('text_photographer', 'Photo by'),
-        ('text_when', 'When'),
-        ('text_who', 'Who'),
-        ('text_where', 'Where')
-    ]
-    
-    # Check if any text fields have content
-    has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
-    if not has_content:
-        return None
-    
-    text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
-    
-    # Remove existing text scene if it exists
-    if bpy.data.scenes.find(text_scene_name) != -1:
-        bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
-    
-    # Create new text scene
-    text_scene = create_scene(generator_scene, text_scene_name)
-    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
-    
-    # Set up transparent background
-    text_scene.render.film_transparent = True
-    
-    # Enhanced anti-aliasing for better text rendering
-    text_scene.eevee.use_taa_reprojection = True
-    text_scene.eevee.taa_samples = 16
-    
-    # Create world with transparent background
-    world = bpy.data.worlds.new(text_scene.name)
-    text_scene.world = world
-    world.use_nodes = True
-    world.node_tree.nodes.clear()
-    
-    # Add transparent background
-    output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
-    transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
-    transparent_node.inputs[0].default_value = (0, 0, 0, 0)
-    transparent_node.inputs[1].default_value = 0
-    world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
-    
-    # Create text objects with outline
-    y_offset = 0.6
-    text_size = 0.18
-    delay_frames = 0
-    fps = get_fps(text_scene)
-    
-    for field_name, label in text_fields:
-        field_value = getattr(slide.slideshow, field_name, '')
-        if field_value:
-            text_content = f"{label}: {field_value}"
-            
-            # Use outline method for better contrast
-            text_obj = create_typewriter_text_with_improved_outline(
-                text_scene, 
-                text_content,
-                f"{field_name.title()}_Text",
-                location=get_text_location(generator_scene, y_offset, text_size),
-                size=text_size
-            )
-            
-            # Add delay to animation
-            if delay_frames > 0:
-                add_animation_delay_robust(text_obj, delay_frames)
-                # Also add delay to outline if using simple outline method
-                if f"{text_obj.name}_Outline" in text_scene.objects:
-                    outline_obj = text_scene.objects[f"{text_obj.name}_Outline"]
-                    add_animation_delay_robust(outline_obj, delay_frames)
-            
-            y_offset -= 0.35
-            delay_frames += int(fps * 1.2)
-    
-    # Set up camera
-    camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
-    camera.location = (0, 0, 5)
-    text_scene.camera = camera
-    
-    return text_scene
-
-
-def create_slide_text_overlay_scene_robust(generator_scene, slide, slide_duration):
-    """Create a scene with text overlays for a specific slide using robust typewriter effects"""
-    
-    # Check if slide has text data and is enabled
-    if not slide.slideshow.enable_text_overlay:
-        return None
-        
-    text_fields = [
-        ('text_photographer', 'Photo by'),
-        ('text_when', 'When'),
-        ('text_who', 'Who'),
-        ('text_where', 'Where')
-    ]
-    
-    # Check if any text fields have content
-    has_content = any(getattr(slide.slideshow, field[0], '') for field in text_fields)
-    if not has_content:
-        return None
-    
-    text_scene_name = f"{generator_scene.snu_slideshow_generator.base_name}-{slide.name}-TextOverlay"
-    
-    # Remove existing text scene if it exists
-    if bpy.data.scenes.find(text_scene_name) != -1:
-        bpy.data.scenes.remove(bpy.data.scenes[text_scene_name])
-    
-    # Create new text scene
-    text_scene = create_scene(generator_scene, text_scene_name)
-    text_scene.frame_end = int(get_fps(text_scene) * slide_duration)
-    
-    # Set up transparent background
-    text_scene.render.film_transparent = True
-    
-    # FIXED: Improved anti-aliasing settings for better text rendering
-    text_scene.eevee.use_taa_reprojection = True
-    text_scene.eevee.taa_samples = 16  # Higher samples for smoother text
-    
-    # Create world with transparent background
-    world = bpy.data.worlds.new(text_scene.name)
-    text_scene.world = world
-    world.use_nodes = True
-    world.node_tree.nodes.clear()
-    
-    # Add transparent background node
-    output_node = world.node_tree.nodes.new('ShaderNodeOutputWorld')
-    transparent_node = world.node_tree.nodes.new('ShaderNodeBackground')
-    transparent_node.inputs[0].default_value = (0, 0, 0, 0)  # Transparent
-    transparent_node.inputs[1].default_value = 0  # No emission
-    world.node_tree.links.new(transparent_node.outputs[0], output_node.inputs[0])
-    
-    # FIXED: Improved text positioning and sizing
-    y_offset = 0.6  # Start higher for better positioning
-    text_size = 0.18  # Slightly larger for better readability with improved spacing
-    delay_frames = 0
-    fps = get_fps(text_scene)
-    
-    for field_name, label in text_fields:
-        field_value = getattr(slide.slideshow, field_name, '')
-        if field_value:
-            text_content = f"{label}: {field_value}"
-            text_obj = create_typewriter_text_robust(
-                text_scene, 
-                text_content,
-                f"{field_name.title()}_Text",
-                location=get_text_location(generator_scene, y_offset, text_size),  # Moved further left for better framing
-                size=text_size
-            )
-            
-            # Add delay to this text's animation
-            if delay_frames > 0:
-                add_animation_delay_robust(text_obj, delay_frames)
-            
-            y_offset -= 0.35  # Increased spacing between text lines
-            delay_frames += int(fps * 1.2)  # Slightly longer delay between text elements
-    
-    # Set up camera
-    camera = add_object(text_scene, f"{text_scene.name}_Camera", 'CAMERA')
-    camera.location = (0, 0, 5)
-    text_scene.camera = camera
-    
-    return text_scene
 
 
 def get_material_elements(material, image_name):
@@ -1199,7 +631,6 @@ def setup_material(material, image):
     nodes = tree.nodes
     nodes.clear()
 
-    # Create nodes
     texture = nodes.new('ShaderNodeTexImage')
     texture.image = image
     texture.image_user.frame_duration = image.frame_duration
@@ -1216,7 +647,6 @@ def setup_material(material, image):
     output = nodes.new('ShaderNodeOutputMaterial')
     output.location = (400, 0)
 
-    # Connect nodes
     tree.links.new(texture.outputs[0], shadeless.inputs[0])
     tree.links.new(texture.outputs[0], shaded.inputs[0])
     tree.links.new(shadeless.outputs[0], mix.inputs[1])
@@ -1240,7 +670,6 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     else:
         print('Importing image '+str(image_number)+', filename: '+image.name)
 
-    # Create and set up image plane
     bpy.context.scene.cursor.location = (0.0, 0.0, 0.0)
     ix = ((image.size[0] / image.size[1])/2)
     iy = 0.5
@@ -1250,7 +679,6 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     image_plane.slideshow.name = image_plane.name
     add_constraints(image_plane, 'Plane')
 
-    # NEW: Load text data for this slide
     text_data = load_slide_text_data(bpy.path.abspath(image.filepath))
     image_plane.slideshow.text_photographer = text_data['photographer']
     image_plane.slideshow.text_when = text_data['when']
@@ -1258,7 +686,6 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     image_plane.slideshow.text_where = text_data['where']
     image_plane.slideshow.has_text_file = text_data['has_text']
 
-# Auto-enable text overlay if text data is found
     if text_data['has_text'] and any([text_data['photographer'], text_data['when'], 
                                      text_data['who'], text_data['where']]):
         image_plane.slideshow.enable_text_overlay = True
@@ -1271,13 +698,11 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         image_plane.slideshow.videofile = image.filepath
         slide_length = image.frame_duration / get_fps(generator_scene)
 
-    # Set up and apply material to plane
     image_material = bpy.data.materials.new(image_plane.name)
     image_plane.data.uv_layers.new()
     image_plane.data.materials.append(image_material)
     setup_material(image_material, image)
 
-    # Set up transform and extras
     if not video:
         randomized = []
         hidden = generator_scene.snu_slideshow_generator.hidden_transforms.split(";")
@@ -1323,14 +748,12 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
             else:
                 extra_texture = generator_scene.snu_slideshow_generator.extra_texture_presets[0].path
 
-        # Add target empty
         target_empty = add_object(generator_scene, image_plane.name+' Target', 'EMPTY')
         target_empty.parent = image_plane
         target_empty.empty_display_size = 1
         add_constraints(target_empty, 'Target')
         image_plane.slideshow.target = target_empty.name
 
-        # Add view empty
         view_empty = add_object(generator_scene, image_plane.name+' View', 'EMPTY')
         view_empty.parent = image_plane
         view_empty.empty_display_size = 1
@@ -1339,7 +762,6 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         add_constraints(view_empty, 'View')
         image_plane.slideshow.view = view_empty.name
 
-    # Add text next to plane saying which index number it is
     index_text = add_object(generator_scene, image_plane.name+' Index', 'FONT')
     index_text.parent = image_plane
     index_text.location = (-1, -.33, 0)
@@ -1347,28 +769,24 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
     add_constraints(index_text, 'Text')
 
     if not video:
-        # Add text next to plane saying which transform was picked
         transform_text = add_object(generator_scene, image_plane.name+' Transform', 'FONT')
         transform_text.parent = image_plane
         transform_text.location = (1, 0, 0)
         transform_text.scale = .15, .15, 1
         add_constraints(transform_text, 'Text')
 
-        # Add text next to plane saying which extra was picked
         extra_text = add_object(generator_scene, image_plane.name+' Extra', 'FONT')
         extra_text.parent = image_plane
         extra_text.location = (1, -.25, 0)
         extra_text.scale = .15, .15, 1
         add_constraints(extra_text, 'Text')
 
-    # Add text next to plane saying how long the slide is
     length_text = add_object(generator_scene, image_plane.name+' Length', 'FONT')
     length_text.parent = image_plane
     length_text.location = (1, .25, 0)
     length_text.scale = .15, .15, 1
     add_constraints(length_text, 'Text')
 
-    # Create group and add everything to it
     image_group = bpy.data.collections.new(image_plane.name)
     image_group.objects.link(image_plane)
     image_group.objects.link(index_text)
@@ -1379,7 +797,6 @@ def import_slideshow_image(image, image_number, slide_length, generator_scene, v
         image_group.objects.link(extra_text)
         image_group.objects.link(view_empty)
 
-    # Additional settings
     image_plane.slideshow.index = image_number + 1
     if not video:
         image_plane.slideshow.length = slide_length
@@ -1396,13 +813,11 @@ def add_constraints(constraint_object, constraint_type):
     location_constraint = constraint_object.constraints.new(type='LIMIT_LOCATION')
     scale_constraint = constraint_object.constraints.new(type='LIMIT_SCALE')
 
-    # Set up rotation constraint
     rotation_constraint.use_limit_x = True
     rotation_constraint.use_limit_y = True
     if constraint_type != 'View':
         rotation_constraint.use_limit_z = True
 
-    # Set up local location constraint
     constraint_object.constraints[1].owner_space = 'LOCAL'
     if constraint_type == 'Target' or constraint_type == 'View':
         location_constraint.min_x = -1 * (aspect_ratio(bpy.context.scene)/2)
@@ -1422,7 +837,6 @@ def add_constraints(constraint_object, constraint_type):
     location_constraint.use_max_z = True
     location_constraint.use_min_z = True
 
-    # Set up limit scale constraint
     scale_constraint.min_x = constraint_object.scale[0]
     scale_constraint.max_x = constraint_object.scale[0]
     scale_constraint.min_y = constraint_object.scale[1]
@@ -1437,7 +851,6 @@ def add_constraints(constraint_object, constraint_type):
         scale_constraint.use_min_z = True
         scale_constraint.use_max_z = True
 
-    # Set up text world location limit
     if constraint_type == 'Text':
         limit_location_constraint = constraint_object.constraints.new(type='LIMIT_LOCATION')
         limit_location_constraint.owner_space = 'WORLD'
@@ -1496,7 +909,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene.snu_slideshow_generator.base_name = base_name
         image_scene.eevee.taa_render_samples = generator_scene.snu_slideshow_generator.render_samples
 
-        # Set up image_scene render settings
         image_scene_frames = int(get_fps(image_scene) * image_plane.slideshow.length)
         image_scene.frame_end = image_scene_frames
 
@@ -1506,13 +918,11 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene.collection.objects.link(target_empty)
         image_scene.collection.objects.link(view_empty)
 
-        # Set up scene world
         world = bpy.data.worlds.new(image_scene.name)
         image_scene.world = world
         world.use_nodes = False
         world.color = (0, 0, 0)
 
-        # Create transforms
         transform_index = get_transform(image_plane.slideshow.transform)
         if transform_index >= 0:
             transform = transforms[transform_index]
@@ -1605,14 +1015,12 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         if not transform_empty.animation_data.action_slot:
             transform_empty.animation_data.action_slot = transform_action.slots[0]
 
-        # Set up camera location scale and animation
         camera = add_object(image_scene, generator_scene.name+' Camera', 'CAMERA')
         camera.parent = transform_empty
         image_scene.camera = camera
         camera.data.dof.focus_object = image_plane
         camera.data.dof.use_dof = False
 
-        # Add camera_scale empty that will scale the transform and camera
         camera_scale = add_object(image_scene, generator_scene.name+' Camera Scale', 'EMPTY')
         camera_scale.parent = image_plane
         transform_empty.parent = camera_scale
@@ -1621,7 +1029,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         camera_scale_value = (view_empty.scale[1] * 2)
         camera_scale.scale = (camera_scale_value, camera_scale_value, camera_scale_value)
 
-        # Run extras script
         if image_plane.slideshow.extra != 'None':
             extra = get_extra(image_plane.slideshow.extra)
             if extra:
@@ -1656,7 +1063,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 except ImportError:
                     pass
 
-        # Add the image scene to the slideshow scene
         clip = generator_scene.sequence_editor.sequences.new_scene(scene=image_scene, name=image_scene.name, channel=((i % 2) + 1), frame_start=image_scene_start)
 
     else:
@@ -1664,7 +1070,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         image_scene_frames = image_plane.slideshow.videolength
         rotate = image_plane.slideshow.rotate
 
-        # Decide if a blurred background clip is needed
         aspect = aspect_ratio(generator_scene)
         clipx = image_plane.dimensions[0]
         clipy = image_plane.dimensions[1]
@@ -1675,13 +1080,11 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         else:
             blur_background = False
 
-        # Determine channel to put clips in
         base_channel = ((i % 2) + 1)
         blur_base_channel = base_channel
         if blur_background:
             base_channel = base_channel + 3
 
-        # Generate video clip(s)
         bpy.ops.sequencer.select_all(action='DESELECT')
         clip = generator_scene.sequence_editor.sequences.new_movie(filepath=image_plane.slideshow.videofile, name=image_plane.name, channel=base_channel, frame_start=image_scene_start)
         flipped = False
@@ -1699,7 +1102,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         else:
             blur_clip = None
 
-        # Set scaling of clip and blur clip
         image = get_image(image_plane.slideshow.videofile)
         clip_x = image.size[0]
         clip_y = image.size[1]
@@ -1710,15 +1112,13 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         video_aspect = clip_x / clip_y
 
         if video_aspect <= aspect:
-            # video is less wide aspect than the scene, scale to height
             if not flipped:
                 video_scale = scene_y / clip_y
                 blur_scale = scene_x / clip_x
             else:
                 video_scale = scene_y / clip_x
                 blur_scale = scene_x / clip_y
-        else:  # if video_aspect > scene_aspect:
-            # video is more wide aspect than the scene, scale to width
+        else:
             if not flipped:
                 video_scale = scene_x / clip_x
                 blur_scale = scene_y / clip_y
@@ -1732,7 +1132,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             blur_clip.transform.scale_x = blur_scale
             blur_clip.transform.scale_y = blur_scale
 
-        # Add other clips
         speed_clip = None
         audioclip = None
         blur_speed_clip = None
@@ -1745,7 +1144,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 audioclip = None
 
             else:
-                # Add fadein/out to audio clip
                 generator_scene.frame_current = image_scene_start
                 audioclip.volume = 0
                 audioclip.keyframe_insert(data_path='volume')
@@ -1779,7 +1177,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 blur_apply_transform = blur_clip
             else:
                 blur_apply_transform = None
-        # Properly scale the clip
         apply_transform.select = True
         if blur_background:
             blur_apply_transform.select = True
@@ -1788,7 +1185,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             blur_blur_clip.size_x = 40
             blur_blur_clip.size_y = 40
 
-        # Create meta strip
         generator_scene.sequence_editor.active_strip = clip
         if blur_clip:
             blur_clip.select = True
@@ -1805,7 +1201,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         bpy.ops.sequencer.meta_make()
         clip = generator_scene.sequence_editor.active_strip
 
-        # Trim video clip
         offset = image_plane.slideshow.videooffset
         clip.frame_offset_start = offset
         clip.frame_start = image_scene_start - offset
@@ -1816,7 +1211,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         else:
             clip.channel = base_channel
 
-    # Add fade in
     if i == 0:
         clip.blend_type = 'ALPHA_OVER'
         generator_scene.frame_current = 1
@@ -1826,7 +1220,6 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
         clip.blend_alpha = 1
         clip.keyframe_insert(data_path='blend_alpha')
 
-    # Add transition
     if generator_scene.snu_slideshow_generator.crossfade_length > 0:
         if previous_image_clip and previous_image_plane:
             first_sequence = previous_image_clip
@@ -1858,13 +1251,11 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
                 if second_sequence.channel > effect_channel:
                     effect_channel = second_sequence.channel
                 if second_sequence.channel > first_sequence.channel:
-                    # second sequence is above first, transitions are normal
                     inverted = False
                     start_color = (0, 0, 0)
                     end_color = (1, 1, 1)
                     apply_mask_to = second_sequence
                 else:
-                    # first sequence is above second, transitions are inverted
                     inverted = True
                     start_color = (1, 1, 1)
                     end_color = (0, 0, 0)
@@ -1900,10 +1291,8 @@ def create_slideshow_slide(image_plane, i, generator_scene, image_scene_start, i
             elif previous_image_plane.slideshow.transition == "NONE":
                 pass
             else:
-                # Create a cross-fade effect strip that transitions between the two images.
                 effect = generator_scene.sequence_editor.sequences.new_effect(name=previous_image_clip.name+' to '+clip.name, channel=3, frame_start=second_sequence.frame_final_start, frame_end=first_sequence.frame_final_end, type='CROSS', input1=first_sequence, input2=second_sequence)
 
-    # Add fade out
     if i == (len(images) - 1):
         clip.blend_type = 'ALPHA_OVER'
         generator_scene.frame_current = int(image_scene_start + image_scene_frames)
@@ -2093,13 +1482,11 @@ def update_order(mode='none', current_scene=None):
     slides = list_slides(current_scene)
 
     if mode == 'none':
-        # Sort slides by their current location only
         changed = False
         oldorder = []
         aspect = round(aspect_ratio(current_scene), 4)
         old_aspect = round(current_scene.snu_slideshow_generator.aspect_ratio, 4)
         for slide in slides:
-            # check if aspect has changed, update slides if needed
             if aspect != old_aspect:
                 update_aspect(slide, current_scene, aspect)
             loc = -slide.location[1]
@@ -2113,18 +1500,13 @@ def update_order(mode='none', current_scene=None):
         if changed:
             update_scene(current_scene)
     else:
-        # Resort the slides in a specific way
-
-        # Sort the slides by index to start with
         slides.sort(key=lambda x: x.slideshow.index)
 
-        # Make a list of only the slides that are not locked
         unfrozen_indices, unfrozen_subset = zip(*[(i, e) for i, e in enumerate(slides) if not e.slideshow.lockposition])
         unfrozen_indices = list(unfrozen_indices)
         unfrozen_subset = list(unfrozen_subset)
 
         if mode == 'random':
-            # Shuffle the index values of the unlocked slides
             random.shuffle(unfrozen_indices)
         elif mode == 'alphabetical':
             unfrozen_subset.sort(key=lambda x: x.slideshow.name)
@@ -2132,11 +1514,9 @@ def update_order(mode='none', current_scene=None):
             unfrozen_subset.sort(key=lambda x: x.slideshow.name)
             unfrozen_subset.reverse()
 
-        # Recombine the sorted indexes and slides
         for i, e in zip(unfrozen_indices, unfrozen_subset):
             slides[i] = e
 
-        # Reenter the slide indexes
         for i, slide in enumerate(slides):
             slide.slideshow.index = i
 
@@ -2150,7 +1530,7 @@ def get_first_3d_view():
     return None
 
 
-# PROPERTY GROUPS (Updated with text overlay properties)
+# PROPERTY GROUPS
 class SnuSlideshowExtraTexturePreset(bpy.types.PropertyGroup):
     """A property group for a texture preset for the extra scenes"""
     name: bpy.props.StringProperty(
@@ -2184,7 +1564,7 @@ class SnuSlideshowImage(bpy.types.PropertyGroup):
     )
     length: bpy.props.FloatProperty(
         name="Slide Length (Seconds)", 
-        default=4.0, 
+        default=12.0, 
         min=1.0,
         update=update_slide_length,
         description="Slide Length In Seconds"
@@ -2340,7 +1720,6 @@ class SnuSlideshowImage(bpy.types.PropertyGroup):
         subtype='FILE_PATH'
     )
     
-    # NEW: Per-slide text overlay properties
     text_photographer: bpy.props.StringProperty(
         name="Photographer",
         default="",
@@ -2374,6 +1753,10 @@ class SnuSlideshowImage(bpy.types.PropertyGroup):
 
 
 class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
+    """Main settings for the slideshow generator"""
+    is_generator_scene: bpy.props.BoolProperty(
+        default=False
+    )
     text_alignment: EnumProperty(
         name="Text Alignment",
         description="Horizontal alignment for overlay text",
@@ -2384,10 +1767,19 @@ class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
         ],
         default='LEFT'
     )
-
-    """Main settings for the slideshow generator"""
-    is_generator_scene: bpy.props.BoolProperty(
-        default=False
+    text_size: bpy.props.FloatProperty(
+        name="Text Size",
+        description="Size of the overlay text",
+        default=0.10,
+        min=0.01,
+        max=1.0
+    )
+    text_y_offset: bpy.props.FloatProperty(
+        name="Text Y Offset",
+        description="Initial vertical position of the overlay text block",
+        default=0.5,
+        min=-2.0,
+        max=2.0
     )
     hidden_transforms: bpy.props.StringProperty(
         name="Hidden Transforms",
@@ -2407,7 +1799,7 @@ class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
     )
     slide_length: bpy.props.FloatProperty(
         name="Slide Length (Seconds)",
-        default=4.0,
+        default=12.0,
         min=1.0,
         max=20.0,
         description="Slide Scene Length In Seconds"
@@ -2468,7 +1860,7 @@ class SnuSlideshowGeneratorSettings(bpy.types.PropertyGroup):
     )
 
 
-# PANELS (Updated UI)
+# PANELS
 class SSG_PT_VSEPanel(bpy.types.Panel):
     """Panel visible in the VSE of the 'Slideshow' scene"""
     bl_label = "Snu Slideshow Generator"
@@ -2509,7 +1901,6 @@ class SSG_PT_Panel(bpy.types.Panel):
         fps = get_fps(current_scene)
         
         if is_generator_scene(current_scene):
-            # Panel is in slideshow generator mode
             slides = list_slides(current_scene)
             row = layout.row()
             if len(slides):
@@ -2517,7 +1908,6 @@ class SSG_PT_Panel(bpy.types.Panel):
                 row.operator('slideshow.create')
 
                 row = layout.row()
-                # Calculate and display slideshow length
                 slideshow_seconds = slideshow_length(slides=slides, fps=fps)
                 slideshow_length_formatted = format_seconds(slideshow_seconds)
                 row.label(text=str(len(slides)) + " Slides, Total Length: "+slideshow_length_formatted)
@@ -2529,7 +1919,6 @@ class SSG_PT_Panel(bpy.types.Panel):
             row = layout.row()
             row.prop(context.scene.snu_slideshow_generator, "render_samples")
             
-            # Audio section
             row = layout.row()
             box = row.box()
             row = box.row()
@@ -2545,11 +1934,20 @@ class SSG_PT_Panel(bpy.types.Panel):
             row.prop(context.scene.snu_slideshow_generator, "audio_fade_length")
             if not context.scene.snu_slideshow_generator.audio_enabled:
                 row.enabled = False
+            
             row = layout.row()
             row.separator()
+            
+            box = layout.box()
+            row = box.row()
+            row.label(text="Text Overlay Settings:")
+            row = box.row()
+            row.prop(context.scene.snu_slideshow_generator, "text_alignment")
+            row = box.row()
+            row.prop(context.scene.snu_slideshow_generator, "text_size")
+            row.prop(context.scene.snu_slideshow_generator, "text_y_offset")
 
             if len(slides):
-                # Sorting options
                 row = layout.row(align=True)
                 row.label(text='Sort:')
                 row.operator('slideshow.update_order', text='Randomize').mode = 'random'
@@ -2567,7 +1965,6 @@ class SSG_PT_Panel(bpy.types.Panel):
                 row.operator('slideshow.delete_slide')
 
         else:
-            # Panel is in create generator mode
             row = layout.row()
             row.prop(context.scene.snu_slideshow_generator, "image_directory")
             row = layout.row()
@@ -2577,7 +1974,6 @@ class SSG_PT_Panel(bpy.types.Panel):
             row = layout.row()
             row.operator('slideshow.generator', text='Slideshow In This Scene').mode = 'direct'
             
-            # Get list of images in image_directory
             image_types = get_extensions_image()
             image_list = []
             for image_type in image_types:
@@ -2636,7 +2032,6 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
 
         selected = context.active_object
         if hasattr(selected, 'slideshow') and selected.slideshow.name != "None":
-            # If a slide image is selected, display configuration options
             current_slide = selected.slideshow
             row = layout.row()
             row.label(text="Image: "+current_slide.name)
@@ -2653,7 +2048,6 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             split = split.split()
             split.prop(current_slide, "lockposition")
             
-            # UPDATED: Text overlay section for individual slides
             if current_slide.has_text_file:
                 innerbox = layout.box()
                 row = innerbox.row()
@@ -2662,7 +2056,6 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
                 row.prop(current_slide, "enable_text_overlay", text="Enable Text Overlay for This Slide")
                 
                 if current_slide.enable_text_overlay:
-                    # Show the text data that was loaded
                     if current_slide.text_photographer:
                         row = innerbox.row()
                         row.label(text=f"Photographer: {current_slide.text_photographer}")
@@ -2676,7 +2069,6 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
                         row = innerbox.row()
                         row.label(text=f"Where: {current_slide.text_where}")
                     
-                    # Allow manual editing
                     row = innerbox.row()
                     row.label(text="Edit Text Data:")
                     row = innerbox.row()
@@ -2768,7 +2160,6 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             row.label(text="Drag an image up or down to rearrange it in the timeline.")
 
         elif 'View' in selected.name:
-            # The view area rectangle is probably selected
             row = layout.box()
             row.label(text="The rectangle is the area the camera will see.")
             row.label(text="It can be scaled down to crop the image,")
@@ -2776,13 +2167,11 @@ class SSG_PT_SlidePanel(bpy.types.Panel):
             row.label(text="or moved to focus on a specific area.")
 
         elif 'Target' in selected.name:
-            # The zoom to target is probably selected
             row = layout.box()
             row.label(text="The cross is the target for transforms like zoom in.")
             row.label(text="It can be moved around the image.")
 
         else:
-            # Something else is selected
             row = layout.box()
             row.label(text="Select An Image To Customize It")
 
@@ -3410,18 +2799,15 @@ class SnuSlideshowCreate(bpy.types.Operator):
         generator_scene = context.scene
         generator_scene.snu_slideshow_generator.generator_workspace = context.workspace.name
 
-        # Set up the Slideshow scene
         clear_sequencer(generator_scene)
         image_scene_start = 1
 
-        # Create a copy of the currently active and selected objects
         active = context.active_object
         selected = []
         for scene_object in context.scene.objects:
             if scene_object.select_get():
                 selected.append(scene_object)
 
-        # Iterate through image list, create scene for each image, and import into VSE
         images = list_slides(generator_scene)
         images.sort(key=lambda x: x.slideshow.index)
         previous_image_clip = None
@@ -3431,11 +2817,9 @@ class SnuSlideshowCreate(bpy.types.Operator):
             previous_image_plane = image_plane
             image_scene_start = previous_image_clip.frame_final_end - generator_scene.snu_slideshow_generator.crossfade_length
             
-            # NEW: Add individual text overlay for this slide if enabled
             if image_plane.slideshow.enable_text_overlay and image_plane.slideshow.has_text_file:
                 text_scene = create_slide_text_overlay_scene_with_improved_outline(generator_scene, image_plane, image_plane.slideshow.length)
                 if text_scene:
-                    # Add text overlay to sequencer for this specific slide
                     text_clip = generator_scene.sequence_editor.sequences.new_scene(
                         scene=text_scene, 
                         name=f"{text_scene.name}_Text", 
@@ -3447,11 +2831,9 @@ class SnuSlideshowCreate(bpy.types.Operator):
 
         self.report({'INFO'}, "Slideshow created")
 
-        # Set slideshow length
         generator_scene.frame_end = image_scene_start + generator_scene.snu_slideshow_generator.crossfade_length
         generator_scene.sync_mode = 'AUDIO_SYNC'
 
-        # Add slideshow audio if enabled
         if generator_scene.snu_slideshow_generator.audio_enabled:
             filename = os.path.realpath(bpy.path.abspath(generator_scene.snu_slideshow_generator.audio_track))
             if os.path.exists(filename):
@@ -3482,7 +2864,6 @@ class SnuSlideshowCreate(bpy.types.Operator):
                         audio_sequence.volume = 0
                         audio_sequence.keyframe_insert(data_path='volume')
 
-        # Attempt to switch to the video editor workspace
         try:
             context.window.workspace = bpy.data.workspaces['Video Editing']
         except KeyError:
@@ -3494,7 +2875,6 @@ class SnuSlideshowCreate(bpy.types.Operator):
         except:
             pass
 
-        # Return the selected and active objects to their previous state
         for scene_object in context.scene.objects:
             if scene_object in selected:
                 scene_object.select_set(True)
@@ -3513,7 +2893,6 @@ class SnuSlideshowGenerator(bpy.types.Operator):
     mode: bpy.props.StringProperty()
 
     def execute(self, context):
-        # Check if slideshow generator scene exists
         if self.mode != 'direct':
             generator_name = context.scene.name + ' Slideshow Generator'
             if bpy.data.scenes.find(generator_name) != -1:
@@ -3525,7 +2904,6 @@ class SnuSlideshowGenerator(bpy.types.Operator):
         image_types = get_extensions_image()
         video_types = get_extensions_video()
 
-        # Get list of images in image_directory
         image_list = []
         video_list = []
         for image_type in image_types:
@@ -3543,7 +2921,6 @@ class SnuSlideshowGenerator(bpy.types.Operator):
 
         self.report({'INFO'}, 'Importing '+str(total_images)+' images')
 
-        # Create scene, switch to it, and set up properties
         if self.mode == 'direct':
             generator_scene = context.scene
             generator_scene.snu_slideshow_generator.base_name = generator_scene.name
@@ -3564,7 +2941,6 @@ class SnuSlideshowGenerator(bpy.types.Operator):
                 new_preset.name = extra_texture_preset.name
                 new_preset.path = extra_texture_preset.path
 
-        # Set up viewport view and settings
         space = get_first_3d_view()
         if space:
             if space.shading.type not in ['MATERIAL', 'RENDERED']:
@@ -3576,13 +2952,11 @@ class SnuSlideshowGenerator(bpy.types.Operator):
             space.overlay.show_relationship_lines = False
             space.lock_cursor = True
 
-        # Add header instruction text
         instructions = add_object(generator_scene, 'Instructions', 'FONT')
         instructions.location = (-1, 1.25, 0.0)
         instructions.scale = (.15, .15, .15)
         instructions.data.body = "Select an image and see the Scene tab in the properties area for details.\nDrag an image to rearrange it in the timeline.\nThe center cross on each image represents the focal point for transformations.\nThe box surrounding each image represents the viewable area for the camera.\nMove, scale, and rotate this to change the viewable area."
 
-        # Iterate through the list and import the images
         image_number = 1
         last_image = None
         for import_data in imports:
@@ -3637,7 +3011,6 @@ classes = [
     SnuSlideshowGenerator
 ]
 
-# Cleanup function to remove frame handlers when addon is disabled
 def cleanup_typewriter_handlers():
     """Remove typewriter frame handlers"""
     if typewriter_frame_handler in bpy.app.handlers.frame_change_pre:
@@ -3651,7 +3024,6 @@ def register():
     bpy.types.Scene.snu_slideshow_generator = bpy.props.PointerProperty(type=SnuSlideshowGeneratorSettings)
     bpy.types.Object.slideshow = bpy.props.PointerProperty(type=SnuSlideshowImage)
 
-    # Remove old handlers and add typewriter handler
     handlers = bpy.app.handlers.depsgraph_update_post
     for handler in handlers:
         if " slideshow_autoupdate " in str(handler):
@@ -3659,7 +3031,7 @@ def register():
     handlers.append(slideshow_autoupdate)
 
 def unregister():
-    cleanup_typewriter_handlers()  # Clean up typewriter handlers
+    cleanup_typewriter_handlers()
     handlers = bpy.app.handlers.depsgraph_update_post
     for handler in handlers:
         if " slideshow_autoupdate " in str(handler):
@@ -3670,3 +3042,213 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+
+# --- Replace create_text_material ---
+def create_text_material(name="TextMaterial"):
+    """Create (or copy-unique) a material for text objects. Always returns a unique material
+       so fades/keyframes do not affect other text objects."""
+    if name in bpy.data.materials:
+        original = bpy.data.materials[name]
+        material = original.copy()
+        material.name = f"{name}_{bpy.app.handlers.frame_change_pre.__hash__() % 100000}_{len(bpy.data.materials)}"
+    else:
+        material = bpy.data.materials.new(name=name)
+
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    emission_node = nodes.new('ShaderNodeEmission')
+    emission_node.name = "TextEmission"
+    emission_node.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+    emission_node.inputs[1].default_value = 2.0
+    emission_node.location = (0, 0)
+
+    output_node = nodes.new('ShaderNodeOutputMaterial')
+    output_node.location = (200, 0)
+    links.new(emission_node.outputs[0], output_node.inputs[0])
+
+    return material
+
+# --- Replace create_outline_material ---
+def create_outline_material(name="TextOutlineMaterial"):
+    """Create (or copy-unique) a material for text outline."""
+    if name in bpy.data.materials:
+        original = bpy.data.materials[name]
+        material = original.copy()
+        material.name = f"{name}_{bpy.app.handlers.frame_change_pre.__hash__() % 100000}_{len(bpy.data.materials)}"
+    else:
+        material = bpy.data.materials.new(name=name)
+
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    emission_node = nodes.new('ShaderNodeEmission')
+    emission_node.name = "OutlineEmission"
+    emission_node.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)
+    emission_node.inputs[1].default_value = 1.5
+    emission_node.location = (0, 0)
+
+    output_node = nodes.new('ShaderNodeOutputMaterial')
+    output_node.location = (200, 0)
+    links.new(emission_node.outputs[0], output_node.inputs[0])
+
+    return material
+
+# --- Replace add_synchronized_fade ---
+
+def add_synchronized_fade(materials, fps, total_frames, start_frame=1, fade_pct_start=0.75, fade_seconds=0.5):
+    """Apply a synchronized fade-out to all given materials.
+    - materials: iterable of bpy.types.Material
+    - fps: frames-per-second for the scene
+    - total_frames: integer total frames of the text scene / slide
+    - start_frame: frame where the text animation starts (so fade is offset correctly)
+    """
+    if not materials or total_frames is None or fps is None:
+        return
+
+    fade_offset = int(total_frames * float(fade_pct_start))
+    fade_length_frames = max(1, int(fps * float(fade_seconds)))
+    fade_start = int(start_frame) + fade_offset
+    fade_end = fade_start + fade_length_frames
+
+    for mat in materials:
+        if not mat or not getattr(mat, "node_tree", None):
+            continue
+
+        node = mat.node_tree.nodes.get("TextEmission") or mat.node_tree.nodes.get("OutlineEmission")
+        if node is None:
+            # nothing to animate
+            continue
+
+        strength_input = node.inputs[1]
+
+        # Build the data_path used by node socket fcurves
+        dpath = f'nodes[\"{node.name}\"].inputs[1].default_value'
+
+        # Remove previous fcurves on both material.animation_data and material.node_tree.animation_data
+        try:
+            nta = getattr(mat, "node_tree", None)
+            if nta and nta.animation_data and nta.animation_data.action:
+                act = nta.animation_data.action
+                for fc in list(act.fcurves):
+                    if fc.data_path == dpath:
+                        act.fcurves.remove(fc)
+        except Exception:
+            pass
+
+        try:
+            if mat.animation_data and mat.animation_data.action:
+                act2 = mat.animation_data.action
+                for fc in list(act2.fcurves):
+                    if fc.data_path == dpath:
+                        act2.fcurves.remove(fc)
+        except Exception:
+            pass
+
+        # Insert keyframes on the node input (this will create/attach animation to material.node_tree)
+        try:
+            initial_strength = float(strength_input.default_value)
+            strength_input.default_value = initial_strength
+            strength_input.keyframe_insert(data_path="default_value", frame=max(1, fade_start - 1))
+            strength_input.default_value = 0.0
+            strength_input.keyframe_insert(data_path="default_value", frame=fade_end)
+        except Exception:
+            # fallback: try inserting keyframes on material sockets via node_tree path
+            try:
+                if mat.node_tree:
+                    mat.node_tree.animation_data_create()
+                    # not much else we can do here generically
+            except Exception:
+                pass
+
+        # Ensure interpolation is linear for this node's fcurve(s)
+        try:
+            if mat.node_tree and mat.node_tree.animation_data and mat.node_tree.animation_data.action:
+                act = mat.node_tree.animation_data.action
+                for fc in act.fcurves:
+                    if fc.data_path == dpath:
+                        for kp in fc.keyframe_points:
+                            kp.interpolation = 'LINEAR'
+        except Exception:
+            pass
+
+
+def create_typewriter_text_with_improved_outline(scene, text_content, name, location=(0, 0, 0), size=1.0, alignment='LEFT', start_frame=1, total_frames=None):
+    """Improved version with unique materials and synchronized fade."""
+    safe_scene_name = getattr(scene, "name", "Scene").replace(" ", "_")
+    outline_mat_name = f"{safe_scene_name}_{name}_OutlineMaterial"
+    main_mat_name = f"{safe_scene_name}_{name}_MainMaterial"
+
+    main_curve = bpy.data.curves.new(name=name, type='FONT')
+    main_obj = bpy.data.objects.new(name=name, object_data=main_curve)
+    scene.collection.objects.link(main_obj)
+
+    outline_curve = bpy.data.curves.new(name=f"{name}_Outline", type='FONT')
+    outline_obj = bpy.data.objects.new(name=f"{name}_Outline", object_data=outline_curve)
+    scene.collection.objects.link(outline_obj)
+
+    text_align = alignment
+    for curve in (main_curve, outline_curve):
+        curve.body = ""
+        curve.size = size
+        curve.extrude = 0.0
+        curve.bevel_depth = 0.0
+        curve.space_character = 1.15
+        curve.space_word = 1.25
+        curve.space_line = 1.15
+        curve.align_x = text_align
+        curve.align_y = 'CENTER'
+        curve.resolution_u = 4
+        curve.render_resolution_u = 4
+        curve.use_fill_caps = True
+
+    base_loc = Vector(location)
+    main_obj.location = base_loc.copy()
+    outline_obj.location = base_loc.copy()
+
+    base_offset = size * 0.02
+    if text_align == 'LEFT':
+        offset_x = base_offset
+    elif text_align == 'RIGHT':
+        offset_x = -base_offset
+    else:
+        offset_x = 0.0
+    offset_y = -abs(base_offset)
+
+    outline_obj.location = main_obj.location + Vector((offset_x, offset_y, -0.001))
+    outline_obj.rotation_euler = main_obj.rotation_euler
+    outline_obj.scale = main_obj.scale
+
+    outline_material = create_outline_material(outline_mat_name)
+    main_material = create_text_material(main_mat_name)
+
+    outline_obj.data.materials.clear()
+    main_obj.data.materials.clear()
+    outline_obj.data.materials.append(outline_material)
+    main_obj.data.materials.append(main_material)
+
+    try:
+        outline_emission = outline_material.node_tree.nodes.get("OutlineEmission")
+        main_emission = main_material.node_tree.nodes.get("TextEmission")
+        if outline_emission and main_emission:
+            outline_emission.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)
+            outline_emission.inputs[1].default_value = 3.0
+            main_emission.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+            main_emission.inputs[1].default_value = 4.0
+    except Exception:
+        pass
+
+    scene.view_layers.update()
+
+    animation_duration = add_typewriter_animation_robust(main_obj, text_content, scene, start_frame)
+    add_typewriter_animation_robust(outline_obj, text_content, scene, start_frame)
+
+    if total_frames:
+        fps = get_fps(scene)
+        add_synchronized_fade([main_material, outline_material], fps, total_frames, start_frame=start_frame)
+
+    return main_obj, outline_obj, main_material, outline_material, animation_duration
